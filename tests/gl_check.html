@@ -1,0 +1,40 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>gl check</title>
+<style>html,body{margin:0;background:#222}canvas{width:800px;height:500px;display:block}</style></head>
+<body><canvas id="c" width="800" height="500"></canvas>
+<script type="module">
+import { createGL } from '../src/render/gl.js';
+import * as L from '../src/render/lowpoly.js';
+import { perspective, lookAt, writeYPR } from '../src/render/mat4.js';
+window.__glcheck = { done: false, error: null };
+try {
+  const G = createGL(document.getElementById('c'));
+  G.resize();
+  perspective(G.proj, 0.9, G.width / G.height, 0.5, 600);
+  lookAt(G.view, 14, 12, 22, 0, 1.5, 0);
+  G.camPos.set([14, 12, 22]);
+  // ground
+  G.createStaticMesh(L.quad(80, 80, 0x6fae4a, 0, 0, 0));
+  // lowpoly shapes merged into one mesh: instanced 6 times with tints
+  const shape = L.merge([
+    L.box(2, 1.2, 3, 0xd8473a, 0, 1.0, 0),
+    L.cyl(0.5, 0.6, 1.4, 8, 0xe8e0c8, 0, 2.2, 1.6, 0.4, 0, 0),
+    L.cone(1.0, 1.8, 7, 0x3b6e2f, 0, 3.0, 0),
+    L.blob(0.9, 0xf2b8c0, 0, 1.0, -1.8, 1, 0.8, 1.2),
+  ]);
+  const M = G.createMesh(shape, 8);
+  for (let i = 0; i < 6; i++) {
+    writeYPR(M.inst, i, (i - 2.5) * 5, 0, (i % 2) * -4, i * 0.6, 0, 0, 1 + 0.1 * i, 1, 1);
+    M.tint[i * 3] = 1; M.tint[i * 3 + 1] = 1 - 0.1 * i; M.tint[i * 3 + 2] = 1 - 0.15 * i;
+  }
+  M.count = 6; M.upload();
+  const S = G.createShadowMesh(8);
+  for (let i = 0; i < 6; i++) { S.data[i * 3] = (i - 2.5) * 5; S.data[i * 3 + 1] = (i % 2) * -4; S.data[i * 3 + 2] = 2.2; }
+  S.count = 6; S.upload();
+  G.render();
+  const err = G.gl.getError();
+  window.__glcheck = { done: true, error: err ? 'GL error ' + err : null, info: { ...G.info } };
+} catch (e) {
+  window.__glcheck = { done: true, error: String(e && e.stack || e) };
+}
+</script></body></html>

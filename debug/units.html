@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Unit renderer debug</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;background:#9fc3dd;font:12px/1.35 ui-monospace,Menlo,monospace;color:#102}
+  canvas{display:block;width:100vw;height:100vh}
+  #hud{position:fixed;left:8px;top:8px;background:rgba(255,255,255,.75);padding:6px 8px;border-radius:4px;white-space:pre;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script type="module">
+// Static debug world for the unit renderer. URL params:
+//   ?mode=crowd&n=2000&f=24   crowd in the real pens with a fake ticker that cycles states
+//   ?mode=lineup              one of each species + 4 farmers in a row (driven via window.dbg for screenshots)
+import { createGL } from '../src/render/gl.js';
+import { perspective, lookAt } from '../src/render/mat4.js';
+import { quad, merge } from '../src/render/lowpoly.js';
+import { mockWorld, fillCrowd, fillPens, spawnItem } from './mockworld.mjs';
+import { AState, FState, ItemKind, SIM_DT } from '../src/config.js';
+import { createUnitRenderer } from '../src/render/units.js';
+import { NSP, SPECIES_NAMES, RIG } from '../src/render/rig.js';
+
+const q = new URLSearchParams(location.search);
+const mode = q.get('mode') || 'lineup';
+const canvas = document.getElementById('c');
+const G = createGL(canvas);
+G.resize(); G.fogNear = 400; G.fogFar = 900;
+const NMAX = +(q.get('n') || 64);
+const W = mockWorld(NMAX, 4 + (+(q.get('f') || 0)), 64);
+W.animalCount = 0; W.farmerCount = 0;
+
+// ground
+G.createStaticMesh(merge([quad(900, 900, q.get('ground') ? parseInt(q.get('ground'), 16) : 0x7fae4e, 0, 0, 0), ...(q.get('ground') ? [] : [quad(40, 8, 0xb59a6a, 0, 0.01, 0)])]));
+
+const errors = [];
+window.addEventListener('error', e => errors.push(String(e.message)));
+window.addEventListener('unhandledrejection', e => errors.push(String(e.reason)));
+
+let units;
+const dbg = window.dbg = { G, W, errors, NSP, names: SPECIES_NAMES, RIG, camera: { tx: 0, ty: 0.5, tz: 0, dist: 8, yaw: 0.6, pitch: 0.35 }, paused: false, ms: 0, frames: 0 };
+
+function setCamera() {
+  const c = dbg.camera, cp = Math.cos(c.pitch), sp = Math.sin(c.pitch);
+  const ex = c.tx + Math.sin(c.yaw) * cp * c.dist, ey = c.ty + sp * c.dist, ez = c.tz + Math.cos(c.yaw) * cp * c.dist;
+  perspective(G.proj, 0.8, G.width / G.height, 0.1, 800);
+  lookAt(G.view, ex, ey, ez, c.tx, c.ty, c.tz);
+  G.camPos[0] = ex; G.camPos[1] = ey; G.camPos[2] = ez;
+}
+
+// ------------------------------------------------------------- fake ticker (crowd mode)
+const CYCLE = [AState.IDLE, AState.WANDER, AState.GRAZE, AState.PECK, AState.SCRATCH, AState.EAT, AState.DRINK, AState.REST, AState.SLEEP, AState.SWIM, AState.WALLOW,
+  AState.ROOT, AState.HOP, AState.FREEZE, AState.FLEE, AState.TROT, AState.CLIMB, AState.BUTT, AState.DISPLAY, AState.LAY, AState.DUSTBATH, AState.SICK, AState.ROLL, AState.DUNG, AState.PREEN, AState.FLOCK, AState.HELD];
+let seed = 12345;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+const prevCopy = (a, b) => b.set(a);
+function fakeTick() {
+  for (const [a, b] of [['a_px', 'a_ppx'], ['a_py', 'a_ppy'], ['a_pz', 'a_ppz'], ['a_heading', 'a_pheading']]) W[b].set(W[a].subarray(0, W.animalCount));
+  for (const [a, b] of [['f_px', 'f_ppx'], ['f_pz', 'f_ppz'], ['f_heading', 'f_pheading']]) W[b].set(W[a].subarray(0, W.farmerCount));
+  const n = W.animalCount;
+  for (let i = 0; i < n; i++) {
+    W.a_animT[i] += SIM_DT;
+    W.a_stateTime[i] -= SIM_DT;
+    if (W.a_stateTime[i] <= 0) {
+      W.a_state[i] = CYCLE[(rnd() * CYCLE.length) | 0];
+      W.a_stateTime[i] = 2 + rnd() * 6; W.a_animT[i] = 0;
+      W.a_heading[i] += (rnd() - 0.5) * 2;
+    }
+    const st = W.a_state[i], s = W.a_species[i], R_ = RIG[s];
+    let v = 0;
+    if (st === AState.WANDER || st === AState.GOTO || st === AState.FLOCK || st === AState.CLIMB || st === AState.HOP) v = R_.walkV;
+    else if (st === AState.FLEE || st === AState.TROT) v = R_.runV * 0.6;
+    else if (st === AState.GRAZE || st === AState.ROOT || st === AState.DISPLAY) v = R_.walkV * 0.15;
+    W.a_speed[i] = v;
+    if (v > 0) {
+      W.a_heading[i] += (rnd() - 0.5) * 0.15;
+      const h = W.a_heading[i];
+      const nx = W.a_px[i] + Math.sin(h) * v * SIM_DT, nz = W.a_pz[i] + Math.cos(h) * v * SIM_DT;
+      if (Math.abs(nx) > 150 || Math.abs(nz) > 150) { W.a_heading[i] += Math.PI * 0.7; }
+      else { W.a_px[i] = nx; W.a_pz[i] = nz; }
+    }
+    W.a_gait[i] += v * SIM_DT / (1.2 * (R_.cullR * 0.5));
+  }
+  const nf = W.farmerCount;
+  for (let f = 0; f < nf; f++) {
+    W.f_animT[f] += SIM_DT; W.f_timer[f] -= SIM_DT;
+    if (W.f_timer[f] <= 0) { W.f_state[f] = (rnd() * 8) | 0; W.f_timer[f] = 3 + rnd() * 5; W.f_animT[f] = 0; W.f_heading[f] += (rnd() - 0.5) * 3; W.f_carry[f] = rnd() < 0.4 ? 1 : 0; }
+    const moving = W.f_state[f] === FState.MOVE || W.f_state[f] === FState.WANDER;
+    const v = moving ? 2.2 : 0;
+    if (moving) { const h = W.f_heading[f]; W.f_px[f] += Math.sin(h) * v * SIM_DT; W.f_pz[f] += Math.cos(h) * v * SIM_DT; if (Math.abs(W.f_px[f]) > 150 || Math.abs(W.f_pz[f]) > 150) W.f_heading[f] += Math.PI; }
+    W.f_gait[f] += v * SIM_DT / 1.45;
+  }
+}
+
+// ------------------------------------------------------------- lineup helpers
+dbg.AState = AState;
+function put(i, s, x, z, st, o = {}) {
+  W.a_species[i] = s; W.a_state[i] = st; W.a_animT[i] = o.t ?? 0.3; W.a_stateTime[i] = 1e9; W.a_flags[i] = o.flags || 0;
+  W.a_px[i] = W.a_ppx[i] = x; W.a_pz[i] = W.a_ppz[i] = z; W.a_py[i] = W.a_ppy[i] = 0;
+  W.a_heading[i] = W.a_pheading[i] = o.heading ?? Math.PI / 2;
+  W.a_scale[i] = o.scale ?? 1; W.a_variant[i] = o.variant ?? 1; W.a_gait[i] = o.gait ?? 0.25; W.a_seed[i] = 7 + i * 131;
+}
+// one row of species ids (default: all species) along X at z, state name or number
+dbg.lineup = function (list, stateName, opts = {}) {
+  const st = typeof stateName === 'number' ? stateName : AState[stateName || 'IDLE'];
+  const ids = list || Array.from({ length: NSP }, (_, k) => k);
+  const spacing = opts.spacing || 3.4;
+  W.animalCount = 0;
+  ids.forEach((s, k) => { put(W.animalCount++, s, (k - (ids.length - 1) / 2) * spacing, opts.z || 0, st, opts); });
+  units.update(W, 1);
+};
+// species s, one animal per variant index in vs (colour idx = (variant>>1)&7; opts.male -> low bit), in a row along X
+dbg.variants = function (s, vs, opts = {}) {
+  W.animalCount = 0;
+  const st = opts.state != null ? (typeof opts.state === 'number' ? opts.state : AState[opts.state]) : AState.IDLE;
+  const sp = opts.spacing || 3, hd = opts.heading ?? 0.1;
+  vs.forEach((v, k) => {
+    const i = W.animalCount++;
+    put(i, s, (k - (vs.length - 1) / 2) * sp, 0, st, { heading: hd, variant: (v << 1) | (opts.male ?? 0), t: opts.t });
+  });
+  units.update(W, 1);
+};
+dbg.setupFarmers = function (opts = {}) {
+  W.farmerCount = 4;
+  for (let t = 0; t < 4; t++) W.f_type[t] = t;
+  for (let f = 0; f < 4; f++) {
+    W.f_px[f] = W.f_ppx[f] = (f - 1.5) * 2.2 + (opts.x ?? 0); W.f_pz[f] = W.f_ppz[f] = opts.z ?? 6; W.f_heading[f] = W.f_pheading[f] = opts.heading ?? 0.5;
+    W.f_state[f] = opts.state ?? FState.IDLE; W.f_animT[f] = opts.t ?? 0.4; W.f_gait[f] = opts.gait ?? 0.2; W.f_carry[f] = opts.carry ? 1 : 0;
+  }
+};
+dbg.cam = function (tx, ty, tz, dist, yaw, pitch) { Object.assign(dbg.camera, { tx, ty, tz, dist, yaw, pitch }); setCamera(); units.update(W, 1); G.render(); };
+dbg.fill = function (n, f, layout) {
+  // crowd of n animals / f farmers (needs ?n=&f= big enough at load)
+  W.animalCount = Math.min(n, W.a_species.length); W.farmerCount = Math.min(f, W.f_type.length);
+  (layout === 'pens' ? fillPens : fillCrowd)(W, NSP, layout === 'pens' ? 1 : 150, 3);
+  dbg.paused = false;
+};
+
+// ------------------------------------------------------------- init
+units = dbg.units = createUnitRenderer(G, W);
+units.hideGates = true;
+if (mode === 'crowd') {
+  dbg.fill(NMAX, W.f_type.length, q.get('layout') || 'pens');
+  Object.assign(dbg.camera, { tx: 0, ty: 0.5, tz: 0, dist: +(q.get('dist') || 200), yaw: 0.5, pitch: 0.7 });
+} else {
+  dbg.lineup();
+  dbg.camera = Object.assign(dbg.camera, { tx: 0, ty: 0.9, tz: 0, dist: 40, yaw: 0.35, pitch: 0.3 });
+  dbg.paused = true;
+}
+setCamera();
+
+// drag orbit
+let drag = null;
+canvas.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointerup', () => { drag = null; });
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  dbg.camera.yaw -= (e.clientX - drag[0]) * 0.006; dbg.camera.pitch = Math.max(0.02, Math.min(1.5, dbg.camera.pitch + (e.clientY - drag[1]) * 0.006));
+  drag = [e.clientX, e.clientY];
+});
+canvas.addEventListener('wheel', e => { dbg.camera.dist = Math.max(2, Math.min(300, dbg.camera.dist * (e.deltaY > 0 ? 1.1 : 0.9))); e.preventDefault(); }, { passive: false });
+window.addEventListener('resize', () => G.resize());
+
+const hud = document.getElementById("hud"); if (q.get("nohud")) hud.style.display = "none";
+let acc = 0, last = performance.now(), hudT = 0, sumMs = 0, cntMs = 0;
+function frame(now) {
+  if (dbg.freeze) { last = now; requestAnimationFrame(frame); return; }   // screenshots of heavy scenes: dbg.freeze = true, then dbg.units.update + G.render by hand
+  const dt = Math.min(0.25, (now - last) / 1000); last = now;
+  if (!dbg.paused) { acc += dt; let steps = 0; while (acc >= SIM_DT && steps < 8) { fakeTick(); acc -= SIM_DT; steps++; } if (steps === 8) acc = 0; }
+  setCamera();
+  const t0 = performance.now();
+  units.update(W, dbg.paused ? 1 : acc / SIM_DT);
+  const t1 = performance.now();
+  G.render();
+  dbg.ms = t1 - t0; sumMs += dbg.ms; cntMs++; dbg.frames++;
+  hudT += dt;
+  if (hudT > 0.5) {
+    const c = units.getInstanceCounts();
+    hud.textContent = `animals ${W.animalCount} farmers ${W.farmerCount} items ${W.itemCount}\nunits.update ${(sumMs / cntMs).toFixed(2)} ms (avg)\ncalls ${G.info.calls} tris ${G.info.triangles} inst ${G.info.instances}\ndrawn animals ${c.animals} culled ${c.culled}\n` + (errors.length ? 'ERRORS ' + errors.join('|') : '');
+    hudT = 0; sumMs = 0; cntMs = 0;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+dbg.ready = true;
+</script>
+</body>
+</html>

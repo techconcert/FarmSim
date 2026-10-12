@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>smooth check</title>
+<style>html,body{margin:0;background:#222}canvas{width:1000px;height:600px;display:block}</style></head>
+<body><canvas id="c" width="1000" height="600"></canvas>
+<script type="module">
+import { createGL } from '../src/render/gl.js';
+import * as L from '../src/render/lowpoly.js';
+import { perspective, lookAt, writeYPR } from '../src/render/mat4.js';
+window.__sc = { done: false };
+try {
+  const G = createGL(document.getElementById('c')); G.resize();
+  const q = new URLSearchParams(location.search);
+  const night = q.get('night') === '1';
+  if (night) { G.sunColor.set([0.05,0.06,0.12]); G.skyColor.set([0.12,0.14,0.28]); G.groundColor.set([0.08,0.08,0.12]); G.fogColor.set([0.05,0.06,0.12]); G.clearColor.set([0.05,0.06,0.12]); }
+  perspective(G.proj, 0.9, G.width / G.height, 0.5, 600);
+  const cam = [2.2, 2.6, 4.6]; lookAt(G.view, cam[0], cam[1], cam[2], 0.3, 0.7, 0); G.camPos.set(cam);
+  G.createStaticMesh(L.quad(120, 120, 0x8f9f5e, 0, 0, 0));
+  const cow = (c, c2) => L.smoothen(L.merge([
+    L.ell(0.9, 0.75, 1.4, c, 0, 1.15, 0, 12, 8),
+    L.ell(0.5, 0.45, 0.55, c, 0, 1.35, 1.5, 10, 6),
+    L.ell(0.3, 0.2, 0.2, c2, 0, 1.2, 1.95, 8, 4),
+    L.rod(-0.5, 0.8, 0.8, -0.5, 0.1, 0.8, 0.2, 0.16, c, 8), L.rod(0.5, 0.8, 0.8, 0.5, 0.1, 0.8, 0.2, 0.16, c, 8),
+    L.rod(-0.5, 0.8, -0.8, -0.5, 0.1, -0.8, 0.2, 0.16, c, 8), L.rod(0.5, 0.8, -0.8, 0.5, 0.1, -0.8, 0.2, 0.16, c, 8),
+  ]));
+  const chick = L.smoothen(L.merge([
+    L.ell(0.3, 0.28, 0.34, 0xe8dfc8, 0, 0.4, 0, 10, 6), L.ell(0.17, 0.17, 0.17, 0xe8dfc8, 0, 0.72, 0.22, 8, 5),
+    L.ell(0.06, 0.04, 0.08, 0xd9a040, 0, 0.7, 0.4, 6, 4), L.ell(0.05, 0.07, 0.04, 0xb8442e, 0, 0.9, 0.22, 6, 4),
+  ]));
+  const A = G.createMesh(cow(0xd8d2c4, 0xd9a8a0), 4, { outline: 0.05 });
+  const B = G.createMesh(cow(0x7a5238, 0xc9a58a), 4, { outline: 0.05 });
+  const C = G.createMesh(chick, 8, { outline: 0.02 });
+  writeYPR(A.inst, 0, -2.2, 0, 0, 0.6, 0, 0, 1, 1, 1); A.count = 1; A.upload();
+  writeYPR(B.inst, 0, 0.6, 0, -0.6, -0.5, 0, 0, 1, 1, 1); B.count = 1; B.upload();
+  for (let i = 0; i < 4; i++) writeYPR(C.inst, i, 2.5 + i * 0.7, 0, 1.5 - i * 0.5, i, 0, 0, 1, 1, 1);
+  writeYPR(C.inst, 4, 2.0, 0, 3, 0.4, 0, 0, -1, 1, 1);
+  C.count = 5; C.upload();
+  const S = G.createShadowMesh(8); S.data.set([-2.2,0,1.6, 0.6,-0.6,1.6, 3.2,0.5,0.5]); S.count = 3; S.upload();
+  G.render();
+  window.__sc = { done: true, err: G.gl.getError(), info: { ...G.info } };
+} catch (e) { window.__sc = { done: true, error: String(e.stack || e) }; }
+</script></body></html>

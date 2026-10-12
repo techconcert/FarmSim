@@ -1,0 +1,12 @@
+{
+  "name": "farm",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve": "python3 serve.py",
+    "test:unit": "node tests/world.test.mjs && node tests/animals.test.mjs && node tests/farmers.test.mjs && node tests/obstacles.test.mjs && node tests/rig.test.mjs && node tests/trucks.test.mjs",
+    "test:e2e": "node tests/smoke.mjs",
+    "bench": "node tests/bench.mjs"
+  }
+}

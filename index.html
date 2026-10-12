@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Low-Poly Farm</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script>
+// Early boot diagnostics: shows any startup failure (incl. module load errors) on screen.
+(function(){
+  function show(msg){
+    var b=document.getElementById('fatal');
+    if(!b){b=document.createElement('pre');b.id='fatal';
+      b.style.cssText='position:fixed;left:12px;right:12px;top:12px;max-height:60vh;overflow:auto;z-index:99;margin:0;padding:12px;background:rgba(40,0,0,.92);color:#ffd6d6;font:12px/1.4 Menlo,monospace;border-radius:8px;white-space:pre-wrap';
+      (document.body||document.documentElement).appendChild(b);}
+    b.textContent='Farm failed to start (please send this text):\n\n'+msg;
+  }
+  window.addEventListener('error',function(e){
+    var t=e.target;
+    if(t&&t!==window&&(t.src||t.href)){show('Failed to load: '+(t.src||t.href));return;}
+    show(String((e.error&&(e.error.stack||e.error.message))||e.message));
+  },true);
+  window.addEventListener('unhandledrejection',function(e){show('Unhandled rejection: '+String(e.reason&&(e.reason.stack||e.reason)));});
+  // Watchdog: only fires if the page is visible (hidden tabs pause rendering) and still not running.
+  var waited=0;
+  var timer=setInterval(function(){
+    var ok=window.__farm&&window.__farm.ready;
+    var box=document.getElementById('fatal');
+    if(ok){ if(box&&box.dataset.kind==='watchdog')box.remove(); clearInterval(timer); return; }
+    if(document.visibilityState==='visible')waited+=1;
+    if(waited>=8&&!box){
+      var gl=null;try{gl=document.createElement('canvas').getContext('webgl2');}catch(_){}
+      show('Farm did not start within 8 s.\nWebGL2 available: '+!!gl+'\nTry a hard refresh (Shift+Cmd+R) or run: python3 serve.py');
+      document.getElementById('fatal').dataset.kind='watchdog';
+    }
+  },1000);
+})();
+</script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
