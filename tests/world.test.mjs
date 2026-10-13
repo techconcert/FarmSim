@@ -30,7 +30,7 @@ T('species table: 20 species, fixed ids/names, normalised shares', () => {
   for (const [k, v] of Object.entries(prod)) assert.equal(SPECIES[Species[k.toUpperCase()]].produce, v, k + ' product');
   for (const k of ['camel', 'ostrich']) assert.ok(SPECIES[Species[k.toUpperCase()]].beh.thirst < 0.6, k + ' needs little water');
   assert.ok(SPECIES[Species.DEER].beh.scare > 3 && SPECIES[Species.DEER].run >= 7, 'deer shy + fast');
-  assert.equal(SPECIES[Species.CAPYBARA].beh.wallow, FeatureKind.HOT_SPRING); assert.equal(SPECIES[Species.BUFFALO].beh.wallow, FeatureKind.MUD_PIT);
+  assert.equal(SPECIES[Species.CAPYBARA].beh.swim, FeatureKind.HOT_SPRING); assert.equal(SPECIES[Species.BUFFALO].beh.wallow, FeatureKind.MUD_PIT);
   assert.equal(SPECIES[Species.GOOSE].beh.swim, FeatureKind.POND);
 });
 

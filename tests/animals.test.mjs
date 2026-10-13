@@ -44,8 +44,8 @@ T('3000 animals, 3600 ticks: sanity, behaviours, production, drain, perf', () =>
         if (s === 1 && st === A.SWIM && W.a_py[i] < minDuckY) minDuckY = W.a_py[i];
         if (s === 1 && st === A.SWIM) { swimN++; assert.ok(inBlob(POND, W.a_px[i], W.a_pz[i], 0), `duck ${i} swimming outside pond blob at t=${t}`); }
         if (s === 6 && st === A.WALLOW) { wallowN++; assert.ok(inBlob(MUD, W.a_px[i], W.a_pz[i], 0), `pig ${i} wallowing outside mud blob at t=${t}`); }
-        if (s === 11 && st === A.SWIM) { nSwim[s]++; assert.ok(inBlob(PENS[11].swim, W.a_px[i], W.a_pz[i], 0), `goose ${i} swimming outside the stream at t=${t}`); }
-        if ((s === 16 || s === 19 || s === 18) && st === A.WALLOW) { nWallow[s]++; assert.ok(inBlob(PENS[s].wallow, W.a_px[i], W.a_pz[i], 0), `species ${s} wallowing outside its blob at t=${t}`); }
+        if ((s === 11 || s === 19) && st === A.SWIM) { nSwim[s]++; assert.ok(inBlob(PENS[s].swim, W.a_px[i], W.a_pz[i], 0), `swimmer ${i} (${s}) outside its blob at t=${t}`); }
+        if ((s === 16 || s === 18) && st === A.WALLOW) { nWallow[s]++; assert.ok(inBlob(PENS[s].wallow, W.a_px[i], W.a_pz[i], 0), `species ${s} wallowing outside its blob at t=${t}`); }
         if (st === A.FLEE && W.a_speed[i] > fleeSpeed[s]) fleeSpeed[s] = W.a_speed[i];
       }
     }
@@ -72,7 +72,7 @@ T('3000 animals, 3600 ticks: sanity, behaviours, production, drain, perf', () =>
   assert.ok(stateSeen[5].has(A.FLOCK), 'sheep flock');
   assert.ok(stateSeen[0].has(A.LAY) || stateSeen[1].has(A.LAY) || stateSeen[2].has(A.LAY), 'birds lay');
   assert.ok(stateSeen[11].has(A.SWIM) && nSwim[11] > 10, 'geese swim in the stream');
-  assert.ok(stateSeen[16].has(A.WALLOW) && nWallow[16] > 10, 'buffalo wallow in the marsh mud'); assert.ok(stateSeen[19].has(A.WALLOW) && nWallow[19] > 10, 'capybaras soak in the hot spring');
+  assert.ok(stateSeen[16].has(A.WALLOW) && nWallow[16] > 10, 'buffalo wallow in the marsh mud'); assert.ok(stateSeen[19].has(A.SWIM) && nSwim[19] > 10, 'capybaras swim in the hot spring');
   assert.ok(stateSeen[14].has(A.DUSTBATH), 'ostriches sand-bathe'); assert.ok(stateSeen[15].has(A.ROLL), 'yaks roll in the snow drift');
   assert.ok(stateSeen[17].has(A.DISPLAY), 'peacocks display'); assert.ok(stateSeen[13].has(A.FREEZE) || stateSeen[13].has(A.FLOCK), 'deer alert / herd');
   for (const s of [10, 12, 18, 19]) assert.ok(stateSeen[s].has(A.GRAZE), 'grazers graze ' + s);

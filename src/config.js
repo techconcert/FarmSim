@@ -40,31 +40,37 @@ const K = FeatureKind, S = Species, I = ItemKind;
 //     swim    FeatureKind of the blob it SWIMs in (POND)            wallow  FeatureKind of the blob it WALLOWs in (MUD_PIT / HOT_SPRING / OASIS)
 //     noon    1 = wallows more around midday                       bath    {kind, state}: DUSTBATH / ROLL in that blob feature (chicken, ostrich, yak)
 //     trot    1 = horse-style TROT laps that spread to neighbours
+//   WATER (sim/animals.js a_wy, render/units.js; see the WATER block below):
+//     buoy    1 = BUOYANT swimmer: floats on the surface of its blob (never sinks): duck, goose, capybara
+//     wade    1 = WADER: non-buoyant, sinks with the blob depth (gravity spring), capped at 0.5 x body height: pig + buffalo (mud wallow), camel (oasis)
+//     noon    1 = cool-down bias: SWIM / WALLOW choice weight rises towards 13:00 (see WATER_NOON in sim/animals.js)
+//   Species classification:  swim (buoyant): duck, goose (pond / stream), capybara (hot spring)   wade (cool-down / wallow): pig, buffalo (mud pit), camel (oasis)
+//   drinks from water bodies (thirst is split ~50/50 by nearest source): duck, goose, capybara, camel (POND / stream / HOT_SPRING / OASIS; never mud / sand / snow).   Everyone else never enters water.
 function sp(name,legs,radius,walk,run,height,diet,produce,weight,color,color2,beh){
   return {name,legs,radius,walk,run,height,diet,produce,weight,share:0,color,color2,beh:beh||{}};
 }
 export const SPECIES=[
   sp('chicken',2,.25,.6,2.0,.45,'grain',I.EGG,.20,0xf2efe6,0xc9402a,{drain:1,turn:9,wd:[2,5],bath:{kind:K.DUST_BATH,state:AState.DUSTBATH}}),
-  sp('duck',2,.28,.5,1.5,.40,'grain',I.EGG,.10,0x8a6f3d,0xf0a020,{drain:1,turn:8,wd:[2,6],swim:K.POND,follow:1}),
+  sp('duck',2,.28,.5,1.5,.40,'grain',I.EGG,.10,0x8a6f3d,0xf0a020,{drain:1,turn:8,wd:[2,6],swim:K.POND,follow:1,buoy:1,noon:1}),
   sp('turkey',2,.40,.7,2.5,.90,'grain',I.EGG,.045,0x5a3d26,0xc8283c,{drain:1,turn:6,wd:[2,6]}),
   sp('rabbit',4,.20,1.2,3.0,.30,'grain',-1,.10,0xb9a58c,0xf1e8dc,{drain:1,turn:10,wd:[2,5],rest:1,scare:6,freeze:1.5}),
   sp('goat',4,.45,.9,2.5,.80,'hay',I.MILK,.04,0xd8cdb8,0x6b4a2e,{drain:1,turn:6,wd:[4,10],rest:1}),
   sp('sheep',4,.50,.8,2.5,.90,'hay',I.WOOL,.05,0xf4f1ea,0x2e2a28,{drain:1.5,turn:5,wd:[4,10],rest:1,panic:1,herd:1}),
-  sp('pig',4,.55,.7,2.0,.80,'grain',-1,.035,0xf0a9a0,0xc97b78,{drain:1.2,turn:5,wd:[3,8],rest:1,wallow:K.MUD_PIT,noon:1}),
+  sp('pig',4,.55,.7,2.0,.80,'grain',-1,.035,0xf0a9a0,0xc97b78,{drain:1.2,turn:5,wd:[3,8],rest:1,wallow:K.MUD_PIT,noon:1,wade:1}),
   sp('cow',4,.90,.8,2.0,1.5,'hay',I.MILK,.025,0xf5f5f0,0x262626,{drain:2.2,turn:3,wd:[4,10],rest:1}),
   sp('horse',4,.90,1.4,6.0,1.6,'hay',-1,.02,0x7a4a28,0x2a1a10,{drain:1,turn:4,wd:[5,14],trot:1}),
   sp('llama',4,.70,1.1,3.0,1.8,'hay',I.WOOL,.03,0xdcc9a5,0x7a5f3c,{drain:1.2,turn:4,wd:[4,10],rest:1}),
   // ---- pens 10-19
   sp('donkey',4,.70,1.0,4.5,1.3,'hay',-1,.025,0x8d8479,0xe8dfd0,{drain:1.3,turn:4,wd:[5,12],rest:1,thirst:.8}),
-  sp('goose',2,.32,.6,2.2,.60,'grain',I.EGG,.07,0xf3f1ea,0xf29a2e,{drain:1,turn:8,wd:[2,6],swim:K.POND,follow:1,thirst:1.1}),
+  sp('goose',2,.32,.6,2.2,.60,'grain',I.EGG,.07,0xf3f1ea,0xf29a2e,{drain:1,turn:8,wd:[2,6],swim:K.POND,follow:1,thirst:1.1,buoy:1,noon:1}),
   sp('alpaca',4,.55,1.0,3.5,1.5,'hay',I.WOOL,.035,0xd6b98f,0x8a6a45,{drain:1.2,turn:5,wd:[4,10],rest:1,panic:1,herd:1}),
   sp('deer',4,.60,1.1,8.0,1.2,'grain',-1,.03,0xa9743f,0xf0e4cf,{drain:1,turn:7,wd:[5,14],rest:1,scare:5,freeze:2.5,fleeD:1.8,panic:1,herd:1}),
   sp('ostrich',2,.60,1.2,8.0,2.1,'grain',I.EGG,.025,0x3b3a3a,0xe9d9c8,{drain:1,turn:6,wd:[4,12],thirst:.5,bath:{kind:K.SAND_BATH,state:AState.DUSTBATH}}),
   sp('yak',4,.95,.7,3.0,1.5,'hay',I.MILK,.02,0x3a2c25,0x8b7765,{drain:2.0,turn:3,wd:[4,10],rest:1,bath:{kind:K.SNOW_DRIFT,state:AState.ROLL}}),
-  sp('buffalo',4,1.0,.8,5.0,1.6,'hay',I.MILK,.02,0x4a3a30,0x2a2220,{drain:2.2,turn:3,wd:[4,10],rest:1,thirst:1.2,wallow:K.MUD_PIT,noon:1}),
+  sp('buffalo',4,1.0,.8,5.0,1.6,'hay',I.MILK,.02,0x4a3a30,0x2a2220,{drain:2.2,turn:3,wd:[4,10],rest:1,thirst:1.2,wallow:K.MUD_PIT,noon:1,wade:1}),
   sp('peacock',2,.35,.6,2.5,.90,'grain',I.EGG,.05,0x2a7f9e,0x3fa56b,{drain:1,turn:6,wd:[2,6],scare:2.2}),
-  sp('camel',4,1.0,1.0,4.5,2.0,'hay',-1,.02,0xc9a56a,0x8a6b3f,{drain:1.8,turn:3,wd:[5,14],rest:1,thirst:.3,wallow:K.OASIS}),
-  sp('capybara',4,.45,.8,3.0,.55,'hay',-1,.06,0x8c6a49,0xb89a78,{drain:1.1,turn:6,wd:[2,6],rest:1,thirst:1.3,wallow:K.HOT_SPRING}),
+  sp('camel',4,1.0,1.0,4.5,2.0,'hay',-1,.02,0xc9a56a,0x8a6b3f,{drain:1.8,turn:3,wd:[5,14],rest:1,thirst:.3,wallow:K.OASIS,noon:1,wade:1}),
+  sp('capybara',4,.45,.8,3.0,.55,'hay',-1,.06,0x8c6a49,0xb89a78,{drain:1.1,turn:6,wd:[2,6],rest:1,thirst:1.3,swim:K.HOT_SPRING,buoy:1,noon:1}),
 ];
 { let tot = 0; for (const d of SPECIES) tot += d.weight; for (const d of SPECIES) d.share = d.weight / tot; }
 
@@ -100,7 +106,7 @@ const TREES=[
 // per-pen feature definitions in local coords (lx, ld = depth from gate edge)
 const WATER_F=()=>F(K.WATER_TROUGH,8,6,3,1,0,.6,true);
 const FEED_F=()=>F(K.FEED_TROUGH,-8,6,4,1,0,.6,true);
-const STREAM_DEF={rx:16,rz:4.2,rot:8*Math.PI/180,harm:[[2,.03,.7],[3,.04,2.1],[5,.02,4.0]]};   // elongated goose stream (pen 11)
+const STREAM_DEF={rx:16,rz:4.2,rot:8*Math.PI/180,harm:[[2,.03,.7],[3,.04,2.1],[5,.02,4.0]],maxDepth:.9};   // elongated goose stream (pen 11)
 const FEATS=[
   [F(K.COOP,0,48,8,6,0,3.2,true),F(K.NEST,0,43.5,6,2,0,0,false),F(K.DUST_BATH,12,30,0,0,3,0,false),F(K.SLEEP_AREA,0,40,0,0,7,0,false)],
   [F(K.POND,3,27,0,0,11,0,false),F(K.DUCK_HOUSE,-15,50,6,4,0,2,true),F(K.NEST,-15,46.5,4,2,0,0,false),F(K.SLEEP_AREA,-12,44,0,0,5,0,false)],
@@ -156,12 +162,12 @@ const GROUNDS=[MEADOW,MEADOW,MEADOW,MEADOW,MEADOW,MEADOW,MEADOW,MEADOW,MEADOW,ME
 // Frame axes in world (x,z): u=(cos rot, sin rot), v=(-sin rot, cos rot).  Deterministic (constants, no RNG).
 const D2R=Math.PI/180;
 const BLOB_DEFS={
-  [K.POND]:{rx:15,rz:9.5,rot:25*D2R,harm:[[2,.04,.7],[3,.05,2.1],[5,.025,4.0]]},
-  [K.MUD_PIT]:{rx:11,rz:7,rot:-20*D2R,harm:[[2,.05,1.9],[3,.04,.4],[5,.02,3.3]]},
+  [K.POND]:{rx:15,rz:9.5,rot:25*D2R,harm:[[2,.04,.7],[3,.05,2.1],[5,.025,4.0]],maxDepth:1.1},
+  [K.MUD_PIT]:{rx:11,rz:7,rot:-20*D2R,harm:[[2,.05,1.9],[3,.04,.4],[5,.02,3.3]],maxDepth:.35},
   [K.SAND_BATH]:{rx:6.5,rz:4.8,rot:10*D2R,harm:[[2,.05,1.2],[3,.05,3.0],[5,.02,.8]]},
   [K.SNOW_DRIFT]:{rx:8.5,rz:5.5,rot:15*D2R,harm:[[2,.05,2.6],[3,.06,.9],[5,.03,4.4]]},
-  [K.OASIS]:{rx:9,rz:6.5,rot:15*D2R,harm:[[2,.04,.3],[3,.05,1.6],[5,.025,2.9]]},
-  [K.HOT_SPRING]:{rx:9.5,rz:6,rot:-10*D2R,harm:[[2,.05,2.2],[3,.04,3.7],[5,.02,1.1]]},
+  [K.OASIS]:{rx:9,rz:6.5,rot:15*D2R,harm:[[2,.04,.3],[3,.05,1.6],[5,.025,2.9]],maxDepth:1.0},
+  [K.HOT_SPRING]:{rx:9.5,rz:6,rot:-10*D2R,harm:[[2,.05,2.2],[3,.04,3.7],[5,.02,1.1]],maxDepth:.9},
 };
 function blobR(b,t){
   const c=Math.cos(t), s=Math.sin(t);
@@ -170,7 +176,7 @@ function blobR(b,t){
   return b.rx*b.rz/Math.sqrt(b.rz*b.rz*c*c+b.rx*b.rx*s*s)*w;
 }
 function initBlob(f,def){
-  const b={rx:def.rx,rz:def.rz,rot:def.rot,harm:def.harm,cr:Math.cos(def.rot),sr:Math.sin(def.rot),rmax:0,rmin:1e9};
+  const b={rx:def.rx,rz:def.rz,rot:def.rot,harm:def.harm,maxDepth:def.maxDepth||0,cr:Math.cos(def.rot),sr:Math.sin(def.rot),rmax:0,rmin:1e9};
   for(let k=0;k<720;k++){ const r=blobR(b,k*Math.PI/360); if(r>b.rmax) b.rmax=r; if(r<b.rmin) b.rmin=r; }
   f.blob=b; f.r=Math.ceil(b.rmax*10)/10;
 }
@@ -199,6 +205,24 @@ export function clampToBlob(f,x,z,margin,out){
   if(rho<=lim){ out[0]=x; out[1]=z; return false; }
   const k=lim>0?lim/rho:0;
   out[0]=f.x+(u*b.cr-v*b.sr)*k; out[1]=f.z+(u*b.sr+v*b.cr)*k; return true;
+}
+
+// ---------------------------------------------------------------- water depth
+// Water blobs (POND incl. the goose stream, OASIS, HOT_SPRING) and the MUD_PIT have a bowl-shaped depth: maxDepth * (1 - t^2), t = distance to the centre
+// normalised by the blob's own outline radius in that direction (0 centre ... 1 shore). SAND_BATH / SNOW_DRIFT have maxDepth 0 (not water).
+// Wading animals sink to min(depth * WADE_K, 0.5 * body height) (spring in sim/animals.js); buoyant ones float. WATER_Y is the visual surface.
+export const WADE_K=0.9, SINK_CAP=0.5, FLOAT_LIFT=0.02;
+export function isWaterKind(k){ return k===K.POND||k===K.OASIS||k===K.HOT_SPRING; }   // drinkable
+// t in [0..1) inside the blob, >=1 outside
+export function blobDepthT(f,x,z){
+  const b=f.blob, dx=x-f.x, dz=z-f.z;
+  const u=dx*b.cr+dz*b.sr, v=-dx*b.sr+dz*b.cr;
+  return Math.sqrt(u*u+v*v)/blobR(b,Math.atan2(v,u));
+}
+// depth in metres at (x,z): 0 at / outside the shore, blob.maxDepth at the centre
+export function blobDepth(f,x,z){
+  const t=blobDepthT(f,x,z);
+  return t>=1?0:f.blob.maxDepth*(1-t*t);
 }
 
 export const PENS=[];
@@ -244,6 +268,8 @@ for(let p=0;p<PEN_COUNT;p++){
     wallow:SPECIES[species].beh.wallow!==undefined?find(SPECIES[species].beh.wallow):null,  // blob this species WALLOWs in
     bath:SPECIES[species].beh.bath?find(SPECIES[species].beh.bath.kind):null,               // dust / sand / snow bath feature
     dungPile:find(K.DUNG_PILE),
+    pool:features.find(f=>isWaterKind(f.kind))||null,   // drinkable water body (pond / stream / oasis / hot spring), null = trough only
+    mud:find(K.MUD_PIT),
   });
 }
 

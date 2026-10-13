@@ -25,19 +25,28 @@ their cargo. Day turns to night, and the lighting, outlines and fog follow.
 
 | Pen | Species | Biome |
 |---|---|---|
-| 0–9 | chicken, duck, turkey, rabbit, goat, sheep, pig, cow, horse, llama | coop, pond, roost, warren, crag, meadow, mud yard, pasture, paddock, highland |
-| 10 | donkey | dry corral |
-| 11 | goose | riverbank |
-| 12 | alpaca | alpine |
-| 13 | deer | forest |
-| 14 | ostrich | savanna |
-| 15 | yak | snow |
-| 16 | buffalo | marsh |
-| 17 | peacock | garden |
-| 18 | camel | desert |
-| 19 | capybara | tropical |
+| 1 | chicken | coop |
+| 2 | duck | pond |
+| 3 | turkey | roost |
+| 4 | rabbit | warren |
+| 5 | goat | crag |
+| 6 | sheep | meadow |
+| 7 | pig | mud yard |
+| 8 | cow | pasture |
+| 9 | horse | paddock |
+| 10 | llama | highland |
+| 11 | donkey | dry corral |
+| 12 | goose | riverbank |
+| 13 | alpaca | alpine |
+| 14 | deer | forest |
+| 15 | ostrich | savanna |
+| 16 | yak | snow |
+| 17 | buffalo | marsh |
+| 18 | peacock | garden |
+| 19 | camel | desert |
+| 20 | capybara | tropical |
 
-Pens sit on a 5 × 4 grid with service lanes between rows. Each biome has its own ground, decor and features. A few trees
+Pens are numbered 1–20 here (pen index 0–19 in the code). They sit on a 5 × 4 grid with service lanes between rows. Each biome has its own ground, decor and features. A few trees
 stand in most pens, and the animals and farmers route around them.
 
 ## Showcase
@@ -64,6 +73,9 @@ stand in most pens, and the animals and farmers route around them.
   doubling, so buffers are sized to live counts rather than the maximum.
 - **Cel shading and inked outlines.** Three shading bands from the sun's N·L, warm light and cool shadow, and an
   inverted-hull outline pass with a width clamped to 1.2–4 px on screen so crowds stay readable.
+- **Water with depth.** Each pond, stream, oasis and spring is a bowl: shallow at the shore, deepest at the centre.
+  Ducks, geese and capybaras are buoyant and float on the surface. Pigs, buffalo and camels wade and sink gradually
+  toward the middle, never deeper than mid-body, and slow down as they go. Animals also drink from the shore.
 - **Round decals.** Spots and patches are flat ellipsoids sunk into the surface and excluded from the outline. No
   stair-stepped patterns.
 - **Three LOD tiers and an adaptive budget.** Near, far (one coarse mesh per species) and a shared blob beyond that.

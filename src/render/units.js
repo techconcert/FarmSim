@@ -1,7 +1,7 @@
 // Unit renderer (WP4): animals, farmers, items, gates, blob shadows. See PLAN.md section 7.
 // Pure data-in / instance-matrices-out: reads World typed arrays, writes M.inst/M.tint of instanced meshes, calls M.upload().
 // No allocation per frame. Works with a mock G (createMesh/createShadowMesh returning plain typed arrays) for Node benchmarks.
-import { MAX_TASKS, PENS, SIM_DT, WATER_Y, AState, FState, TaskType, ItemKind, ItemState } from '../config.js';
+import { MAX_TASKS, PENS, SPECIES, SIM_DT, WATER_Y, AState, FState, TaskType, ItemKind, ItemState, FeatureKind, FLOAT_LIFT, SINK_CAP } from '../config.js';
 import { multiply } from './mat4.js';
 import { ell, smoothen } from './lowpoly.js';
 import {
@@ -112,6 +112,14 @@ function ensure(M, k) {
     M.inst.set(oi.subarray(0, Math.min(oi.length, k * 16))); M.tint.set(ot.subarray(0, Math.min(ot.length, k * 3))); M.capacity = nc;
   }
 }
+// water: per species buoyant (floats at the surface) / wader (sinks by a_wy, hard-capped at SINK_CAP x height) / mud wallow (lies down, mud tint)
+const BUOYR = new Uint8Array(32), WADER = new Uint8Array(32), MUDW = new Uint8Array(32), HGTR = new Float32Array(32);
+for (let s = 0; s < SPECIES.length; s++) {
+  const b = SPECIES[s].beh; BUOYR[s] = b.buoy ? 1 : 0; WADER[s] = b.wade ? 1 : 0; HGTR[s] = SPECIES[s].height;
+  MUDW[s] = b.wallow === FeatureKind.MUD_PIT ? 1 : 0;
+}
+const INV_LIFT = 1 / FLOAT_LIFT;
+const WON_R = new Uint8Array(32); for (let s = 0; s < SPECIES.length; s++) WON_R[s] = BUOYR[s] | WADER[s];
 // animal states that lay the body down (used by the blob tier, which skips the full pose machine)
 const LIE_ST = new Uint8Array(32);
 for (const st of [AState.REST, AState.SLEEP, AState.SICK, AState.LAY, AState.DUSTBATH, AState.WALLOW, AState.ROLL]) LIE_ST[st] = 1;
@@ -222,7 +230,7 @@ export function createUnitRenderer(G, W) {
 
     // gather arrays
     const a_species = w.a_species, a_state = w.a_state, a_flags = w.a_flags, a_variant = w.a_variant, a_seed = w.a_seed;
-    const a_px = w.a_px, a_py = w.a_py, a_pz = w.a_pz, a_ppx = w.a_ppx, a_ppy = w.a_ppy, a_ppz = w.a_ppz;
+    const a_px = w.a_px, a_py = w.a_py, a_pz = w.a_pz, a_ppx = w.a_ppx, a_ppy = w.a_ppy, a_ppz = w.a_ppz, a_wy = w.a_wy, a_pwy = w.a_pwy;
     const a_heading = w.a_heading, a_pheading = w.a_pheading, a_animT = w.a_animT, a_gait = w.a_gait, a_scale = w.a_scale;
     let nSh = 0, nLeg = 0, nLegF = 0, nBLeg = 0, nDLeg = 0, nBlob = 0, culled = 0, cNear = 0, cFar = 0;
     nBody.fill(0); nWhole.fill(0); nBodyA.fill(0); nWholeA.fill(0); nMale.fill(0); nFanA.fill(0); nFanFA.fill(0);
@@ -241,6 +249,13 @@ export function createUnitRenderer(G, W) {
       const x = px0 + (px1 - px0) * alpha, z = pz0 + (pz1 - pz0) * alpha;
       const py = a_ppy[i] + (a_py[i] - a_ppy[i]) * alpha;
       let sc = a_scale[i]; if (!(sc > 0)) sc = 1;
+      // water: flo 0..1 = how much a buoyant animal floats; sink = metres a wader is sunk (<= SINK_CAP x height, hard clamp)
+      let flo = 0, sink = 0, sinkCap = 0;
+      if (WON_R[s] === 1) {
+        const wy = a_pwy[i] + (a_wy[i] - a_pwy[i]) * alpha;
+        if (BUOYR[s] === 1) { flo = wy * INV_LIFT; flo = flo < 0 ? 0 : flo > 1 ? 1 : flo; }
+        else if (wy < 0) { sinkCap = SINK_CAP * HGTR[s] * sc; sink = -wy > sinkCap ? sinkCap : -wy; }
+      }
       const rr = rg.cullR * sc;
       const ddx = x - camX, ddy = py + rg.bodyY - camY, ddz = z - camZ;
       const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
@@ -262,13 +277,14 @@ export function createUnitRenderer(G, W) {
         dhB -= TWO_PI * Math.round(dhB / TWO_PI);
         setBR(a_pheading[i] + dhB * alpha, 0, 0);
         const viB = ((a_variant[i] >> 1) & 7) + s * 8, viB3 = viB * 3, bl = rg.blob, ac = VA[viB] === 1 ? rg.avgAlt : rg.avg;
-        const ypB = py + (rg.bodyY * (1 - lieB) + rg.lieY * lieB) * sc;
+        let ypB = py + (rg.bodyY * (1 - lieB) + rg.lieY * lieB) * sc - sink * (1 - 0.5 * lieB);
+        if (flo > 0) { const yw = WATER_Y + rg.swimY * 0.55 * sc; ypB += (yw - ypB) * flo; }
         const ox = bl[3] * sc, oy = bl[4] * sc, oz = bl[5] * sc;
         if (nBlob >= capOf(BLOB)) ensure(BLOB, nBlob);
         putBody(BLOB.inst, nBlob, x + BR[0] * ox + BR[3] * oy + BR[6] * oz, ypB + BR[1] * ox + BR[4] * oy + BR[7] * oz, z + BR[2] * ox + BR[5] * oy + BR[8] * oz, bl[0] * sc, bl[1] * sc, bl[2] * sc);
         setTint(BLOB.tint, nBlob, ac[0] * VT[viB3], ac[1] * VT[viB3 + 1], ac[2] * VT[viB3 + 2]);
         nBlob++;
-        { const o = nSh * 3; sd[o] = x; sd[o + 1] = z; sd[o + 2] = shadowK * rg.radius * sc; nSh++; }
+        if (flo < 0.3) { const o = nSh * 3; sd[o] = x; sd[o + 1] = z; sd[o + 2] = shadowK * rg.radius * sc * (sink > 0 ? 1 - 0.5 * sink / sinkCap : 1); nSh++; }
         continue;
       }
       if (far) cFar++; else cNear++;
@@ -331,7 +347,9 @@ export function createUnitRenderer(G, W) {
         case A.DUSTBATH:
           lieT = 1; roll = 0.32 * fsin(24 * t + ph0) + 0.4 * fsin(2.1 * t); yaw += 0.18 * fsin(11 * t); hpT = 0.3 * fsin(9 * t); yOff = 0.01; amp = 0; bob = 0; break;
         case A.WALLOW:
-          lieT = 1; roll = 0.42 * fsin(1.7 * t + ph0); hpT = 0.25 * fsin(1.7 * t + 1); mud = true; amp = 0; bob = 0; break;
+          if (MUDW[s] === 1) { lieT = 1; roll = 0.42 * fsin(1.7 * t + ph0); hpT = 0.25 * fsin(1.7 * t + 1); mud = true; }
+          else { pitch = 0.03 * fsin(1.3 * t + ph0); roll = 0.03 * fsin(1.7 * t + ph0); hpT = G_ * 0.35 * (1 + fsin(0.9 * t + ph0)); }   // wading in clear water: stands, dips its head
+          amp = 0; bob = 0; break;
         case A.ROLL:
           lieT = 1; foldT = 0.1; roll = 1.3 * fsin(2.2 * t + ph0); k0 = 0.7 * fsin(8 * t); k1 = -k0; hpT = 0.2 * fsin(4.4 * t); yOff = 0.0; amp = 0; bob = 0; break;
         case A.SWIM:
@@ -371,6 +389,11 @@ export function createUnitRenderer(G, W) {
       }
       if (rg.hopper && moving) hop = true;
       if (foldT < 0) foldT = lieT;
+      // water: buoyant animals in the water (not only in SWIM) float with their legs tucked; waders get a slow +-1 deg sway while sunk
+      if (flo > 0.8 && !swim) {
+        swim = true; nolegs = true; yOff += 0.012 * fsin(3.1 * t + ph0); pitch += 0.05 * fsin(2.6 * t + ph0); roll += 0.04 * fsin(1.9 * t + ph0);
+      }
+      if (sink > 0.03 && !swim) { roll += 0.017 * fsin(1.1 * t + ph0 * 3); pitch += 0.012 * fsin(0.8 * t + ph0 * 2); yOff += 0.008 * fsin(1.7 * t + ph0); }
       if (st === A.HOP && rg.hopper && !moving) hop = true;
 
       // body modifiers for fan / sickness
@@ -403,7 +426,10 @@ export function createUnitRenderer(G, W) {
       let u = sc * sMul;
       let ypiv;
       if (swim) ypiv = WATER_Y + rg.swimY * 0.55 * sc + yOff * sc;
-      else ypiv = py + ((rg.bodyY * (1 - lie) + rg.lieY * lie + yOff) * u);
+      else {
+        ypiv = py + ((rg.bodyY * (1 - lie) + rg.lieY * lie + yOff) * u) - sink * (1 - 0.5 * lie);
+        if (flo > 0) ypiv += (WATER_Y + rg.swimY * 0.55 * sc - ypiv) * flo;   // wading out of the shallows: body settles onto the surface
+      }
       setBR(yaw, pitch, roll);
       const vi = ((a_variant[i] >> 1) & 7) + s * 8, vi3 = vi * 3;
       const alt = VA[vi] === 1;
@@ -487,8 +513,8 @@ export function createUnitRenderer(G, W) {
       }
 
       // shadow
-      if (!swim) {
-        const o = nSh * 3; sd[o] = x; sd[o + 1] = z; sd[o + 2] = shadowK * rg.radius * sc * (lie > 0.5 ? 0.9 : 1); nSh++;
+      if (!swim && flo < 0.3) {
+        const o = nSh * 3; sd[o] = x; sd[o + 1] = z; sd[o + 2] = shadowK * rg.radius * sc * (lie > 0.5 ? 0.9 : 1) * (sink > 0 ? 1 - 0.5 * sink / sinkCap : 1); nSh++;
       }
     }
     for (let s = 0; s < NSP; s++) {

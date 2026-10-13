@@ -1,8 +1,9 @@
 // QA hook: window.__farm. Stats are updated in place (no per-frame allocation).
-import { SPECIES_COUNT, SIM_DT, WORLD, START_HOUR, DAY_LENGTH_SEC } from './config.js';
+import { SPECIES_COUNT, SPECIES, SIM_DT, WORLD, START_HOUR, DAY_LENGTH_SEC, AState } from './config.js';
 import { penOf } from './ecs/world.js';
 import { getTruckStats, spawnTruck } from './sim/trucks.js';
 
+const WATER_BEH = SPECIES.map(d => (d.beh.buoy ? 1 : d.beh.wade ? 2 : 0));   // 1 buoyant swimmer, 2 wader
 export function installQA(ctx) {
   const { W, G } = ctx;
   const stats = {
@@ -10,6 +11,7 @@ export function installQA(ctx) {
     tasksCreated: new Array(7).fill(0), tasksDone: new Array(7).fill(0), delivered: new Array(8).fill(0),
     speciesCounts: new Array(SPECIES_COUNT).fill(0), farmerStates: new Array(8).fill(0), farmerTypes: new Array(4).fill(0),
     trucks: 0, trucksVisited: 0, farmerLoads: 0, farmerLoadGoods: 0, autoLoads: 0, loaders: 0, shipped: new Array(8).fill(0), truckStock: new Array(3).fill(0), drawCalls: 0, triangles: 0, instances: 0, animalsOutOfPen: 0, nanCount: 0,
+    waterSwimmers: 0, waterWaders: 0, waterDrinkers: 0,   // buoyant animals afloat / waders sunk > 1 cm / animals drinking at a pond, oasis or spring (not a trough)
   };
   const farm = {
     ready: false, error: null, errors: [], stats, W, G,
@@ -26,13 +28,19 @@ export function installQA(ctx) {
   };
   let lastHeavy = 0;
   function heavy() {
-    let oop = 0, nan = 0;
-    const n = W.animalCount, px = W.a_px, pz = W.a_pz, py = W.a_py, sp = W.a_species;
+    let oop = 0, nan = 0, sw = 0, wd = 0, dr = 0;
+    const n = W.animalCount, px = W.a_px, pz = W.a_pz, py = W.a_py, sp = W.a_species, wy = W.a_wy, wdk = W.a_wdrink, ast = W.a_state;
     for (let i = 0; i < n; i++) {
       const x = px[i], z = pz[i], y = py[i];
-      if (x !== x || z !== z || y !== y || x - x !== 0 || z - z !== 0) { nan++; continue; }
-      if (penOf(x, z) !== sp[i]) oop++;
+      if (x !== x || z !== z || y !== y || x - x !== 0 || z - z !== 0 || wy[i] !== wy[i]) { nan++; continue; }
+      const s = sp[i];
+      if (penOf(x, z) !== s) oop++;
+      if (WATER_BEH[s] !== 0) {
+        if (WATER_BEH[s] === 1) { if (wy[i] > 0.004 || ast[i] === AState.SWIM) sw++; } else if (wy[i] < -0.01) wd++;
+        if (ast[i] === AState.DRINK && wdk[i] === 1) dr++;
+      }
     }
+    stats.waterSwimmers = sw; stats.waterWaders = wd; stats.waterDrinkers = dr;
     const m = W.farmerCount;
     for (let i = 0; i < m; i++) { const x = W.f_px[i], z = W.f_pz[i]; if (x !== x || z !== z || x < WORLD.x0 - 5 || x > WORLD.x1 + 5 || z < WORLD.z0 - 5 || z > WORLD.z1 + 5) nan++; }
     stats.animalsOutOfPen = oop; stats.nanCount = nan;

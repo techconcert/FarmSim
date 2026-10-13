@@ -55,6 +55,14 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
     Circle solids bend the heading tangentially. Rectangles are slid along. A jam-rescue flips the avoid side when an
     animal is blocked for 5 s.
   - Hard push-out from solids and pen clamp act as a safety net.
+  - Water: each water blob (pond, stream, oasis, hot spring; mud is shallow) has a bowl depth profile,
+    `maxDepth × (1 − t²)` with t the normalised distance to the centre along the blob's own outline, so depth is 0 at
+    the shore and greatest at the centre. Buoyant species (`beh.buoy`: duck, goose, capybara) float at the surface.
+    Wading species (`beh.wade`: pig, buffalo, camel) sink with a critically damped spring toward
+    `−min(depth × 0.9, 0.5 × height)`, so they sink gradually toward the middle and never deeper than mid-height. They
+    also slow down in deep water. `a_wy` / `a_pwy` carry the vertical offset to the renderer. Hot hours (10:00–17:00,
+    peaking at 13:00) raise the chance of cooling off in the water. Animals can drink at a trough or at the shore of
+    a pond, stream, oasis or hot spring, which does not drain the pen's trough stock.
   - Production (eggs, milk, wool), manure and sickness are per pen.
 - `tasks.js` `updateTasks(W, dt)`: generates tasks every 0.5 s (feed, water, collect eggs, milk, shear, clean, treat)
   with mask deduplication, then lets idle farmers claim them every 0.1 s. Loading jobs for trucks are offered here too.

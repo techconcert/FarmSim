@@ -8,7 +8,7 @@
 //  FLEE : run   TROT : horse trot (0.5*run)   DISPLAY : turkey strut (slow walk)
 //  EAT/DRINK : stationary at trough, facing it    BUTT : goats face each other, partner in a_leader
 //  HELD : untouched (WP3 owns it)   a_leader : duck/sheep leader (or goat BUTT partner), -1 none
-import { SPECIES, PENS, PEN_COUNT, AState as A, AFlag, FeatureKind as K, ItemKind, WATER_Y, MAX_ANIMALS, blobPoint, inBlob, clampToBlob } from '../config.js';
+import { SPECIES, PENS, PEN_COUNT, AState as A, AFlag, FeatureKind as K, ItemKind, WATER_Y, MAX_ANIMALS, blobPoint, inBlob, clampToBlob, blobDepth, WADE_K, SINK_CAP, FLOAT_LIFT } from '../config.js';
 import { queryHash } from '../ecs/spatialHash.js';
 import { spawnItem, terrainHeight, pushOutOfSolids, isNight } from '../ecs/world.js';
 
@@ -29,6 +29,7 @@ const TURN = new Float32Array(NS), WD_MIN = new Float32Array(NS), WD_MAX = new F
 const DRAIN_MUL = new Float32Array(NS), THIRST_MUL = new Float32Array(NS), SCARE_R = new Float32Array(NS), FREEZE_R2 = new Float32Array(NS), FLEE_D = new Float32Array(NS);
 const PROD_RATE = new Float32Array(NS), IS_LAYER = new Uint8Array(NS), IS_MW = new Uint8Array(NS), IS_HAY = new Uint8Array(NS);
 const HAS_REST = new Uint8Array(NS), PANIC = new Uint8Array(NS), HERD = new Uint8Array(NS), FOLLOW = new Uint8Array(NS), NOON = new Uint8Array(NS), TROTS = new Uint8Array(NS);
+const BUOY = new Uint8Array(NS), WADE = new Uint8Array(NS), WON = new Uint8Array(NS);   // WATER: buoyant swimmer / wader / either (runs the vertical water spring)
 const BATH_ROLL = new Uint8Array(NS);   // 1: the species' bath feature is for ROLL (yak snow drift) rather than DUSTBATH
 for (let s = 0; s < NS; s++) {
   const d = SPECIES[s], b = d.beh;
@@ -41,6 +42,7 @@ for (let s = 0; s < NS; s++) {
   DRAIN_MUL[s] = b.drain || 1; THIRST_MUL[s] = b.thirst || 1;
   SCARE_R[s] = b.scare || 1.5; FREEZE_R2[s] = (b.freeze || 0) * (b.freeze || 0); FLEE_D[s] = b.fleeD || 1;
   HAS_REST[s] = b.rest ? 1 : 0; PANIC[s] = b.panic ? 1 : 0; HERD[s] = b.herd ? 1 : 0; FOLLOW[s] = b.follow ? 1 : 0; NOON[s] = b.noon ? 1 : 0;
+  BUOY[s] = b.buoy ? 1 : 0; WADE[s] = b.wade ? 1 : 0; WON[s] = BUOY[s] | WADE[s];
   TROTS[s] = b.trot ? 1 : 0; BATH_ROLL[s] = b.bath && b.bath.state === A.ROLL ? 1 : 0;
 }
 const K_FOOD = 0.2, K_WATER = 0.18;        // pen_food/pen_water drain = dt*K*DRAIN_MUL*(eaters/max(1,pen_count)); large grazers spend more time queueing/grazing than eating, so their eating fraction is lower: DRAIN_MUL compensates
@@ -82,17 +84,49 @@ const TBL = [
   // 18 camel: rests a lot, cools off in the oasis now and then
   [[A.GRAZE, .32], [A.REST, .28], [A.IDLE, .15], [A.WANDER, .15], [A.WALLOW, .05], [EATHAY, .05]],
   // 19 capybara: soaks in the hot spring
-  [[A.WALLOW, .30], [A.GRAZE, .28], [A.REST, .17], [A.IDLE, .12], [A.WANDER, .13]],
+  [[A.SWIM, .30], [A.GRAZE, .28], [A.REST, .17], [A.IDLE, .12], [A.WANDER, .13]],
 ];
-const TS = [], TW = [], TTOT = new Float32Array(NS);
+const TS = [], TW = [], TTOT = new Float32Array(NS), TWATER = new Float32Array(NS);   // TWATER: summed weight of the SWIM / WALLOW entries (cool-down choices)
 for (let s = 0; s < NS; s++) {
   TS.push(new Uint8Array(TBL[s].map(e => e[0]))); TW.push(new Float32Array(TBL[s].map(e => e[1])));
   TTOT[s] = TBL[s].reduce((a, e) => a + e[1], 0);
+  TWATER[s] = TBL[s].reduce((a, e) => a + (e[0] === A.SWIM || e[0] === A.WALLOW ? e[1] : 0), 0);
 }
 
 // pen geometry caches
 const PX0 = new Float32Array(NS), PX1 = new Float32Array(NS), PZ0 = new Float32Array(NS), PZ1 = new Float32Array(NS);
 const SW = PENS.map(P => P.swim), WL = PENS.map(P => P.wallow), BATH = PENS.map(P => P.bath), DUNGP = PENS.map(P => P.dungPile);   // per-pen blob / circle features (null = none)
+// WATER: per-pen blob that carries the vertical water logic (swimmers' pond / spring, waders' mud pit / oasis; null = species never enters water), its bounding circle,
+// and the drinkable water body of the pen (POND / stream / OASIS / HOT_SPRING; null = trough only)
+const WB = PENS.map((P, p) => (WON[p] ? (P.swim || P.wallow) : null));
+const DPOOL = PENS.map(P => P.pool);
+const WCX = new Float32Array(NS), WCZ = new Float32Array(NS), WR2 = new Float32Array(NS);
+for (let p = 0; p < NS; p++) if (WB[p]) { WCX[p] = WB[p].x; WCZ[p] = WB[p].z; WR2[p] = (WB[p].blob.rmax + 0.3) ** 2; }
+// depth lookup grid per water blob (0.25 m cells over its bounding box, bilinear): O(1) and trig-free, same values as config.blobDepth (+-1 mm)
+const DG_CELL = 0.25, DG_INV = 1 / DG_CELL;
+const DG_N = new Int32Array(NS), DG_X0 = new Float32Array(NS), DG_Z0 = new Float32Array(NS), DG = [];
+for (let p = 0; p < NS; p++) {
+  DG.push(null);
+  if (!WB[p]) continue;
+  const f = WB[p], r = f.blob.rmax + 0.6, n = Math.ceil(2 * r * DG_INV) + 2;
+  DG_N[p] = n; DG_X0[p] = f.x - r; DG_Z0[p] = f.z - r;
+  const g = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) g[j * n + i] = blobDepth(f, DG_X0[p] + i * DG_CELL, DG_Z0[p] + j * DG_CELL);
+  DG[p] = g;
+}
+function depthAt(p, x, z) {
+  const n = DG_N[p], fx = (x - DG_X0[p]) * DG_INV, fz = (z - DG_Z0[p]) * DG_INV;
+  let ix = fx | 0, iz = fz | 0;
+  if (fx < 0 || fz < 0 || ix >= n - 1 || iz >= n - 1) return 0;
+  const tx = fx - ix, tz = fz - iz, g = DG[p], o = iz * n + ix;
+  if (g[o] === 0 || g[o + 1] === 0 || g[o + n] === 0 || g[o + n + 1] === 0) return 0;   // shoreline cell: dry (also stops the bilinear blur leaking outside the outline)
+  return (g[o] * (1 - tx) + g[o + 1] * tx) * (1 - tz) + (g[o + n] * (1 - tx) + g[o + n + 1] * tx) * tz;
+}
+const WK = 36, WC = 12;                  // critically damped vertical spring: omega = 6 /s, damping 2*omega
+const HALF_H = new Float32Array(NS); for (let s = 0; s < NS; s++) HALF_H[s] = SINK_CAP * SPECIES[s].height;   // hard cap on the sink (x a_scale)
+const wTgt = new Float32Array(MAX_ANIMALS);   // cached target a_wy (recomputed on the animal's slow parity)
+// cool-down bias towards midday: 0 outside 10:00-17:00, rising to 1 at 13:00, back to 0 at 17:00
+function noonBell(h) { return h < 10 || h >= 17 ? 0 : h < 13 ? (h - 10) / 3 : (17 - h) * 0.25; }
 const BURROWS = PENS[3].features.filter(f => f.kind === K.BURROW);
 const ROCKS = PENS[4].features.filter(f => f.kind === K.ROCK);
 const GOAT_BROWSE = PENS[4].features.filter(f => f.kind === K.BUSH || f.kind === K.HAY_FEEDER);
@@ -274,10 +308,10 @@ const invCnt = new Float32Array(NS), nearT = new Float32Array(MAX_ANIMALS);   //
 // per-tick cached references
 let _W = null, _rand = null, _night = false, _tick = 0, _n = 0;
 let a_px, a_py, a_pz, a_vx, a_vz, a_heading, a_speed, a_tx, a_tz, a_stateTime, a_animT, a_gait, a_scale, a_hunger, a_thirst,
-  a_energy, a_produce, a_health, a_species, a_state, a_next, a_flags, a_variant, a_leader, a_heldBy, a_seed, hash;
+  a_energy, a_produce, a_health, a_species, a_state, a_next, a_flags, a_variant, a_leader, a_heldBy, a_seed, a_wy, a_wvy, a_wdrink, hash;
 
 function initAn(W) {
-  avoidT.fill(0); avoidO.fill(0); stuckT.fill(0); steerOn.fill(0);   // module-level scratch: a new world starts clean (determinism)
+  avoidT.fill(0); avoidO.fill(0); stuckT.fill(0); steerOn.fill(0); wTgt.fill(0);   // module-level scratch: a new world starts clean (determinism)
   W._an = { manT: new Float32Array(NS), manNext: new Float32Array(NS), sickT: new Float32Array(NS) };
   for (let p = 0; p < NS; p++) { W._an.manT[p] = W.rand() * MANURE_EVERY; W._an.manNext[p] = MANURE_EVERY * (0.6 + 0.8 * W.rand()); W._an.sickT[p] = W.rand() * SICK_EVERY * 0.5; }
 }
@@ -309,8 +343,32 @@ function blobInterior(f, margin, out) {
   if (!inBlob(f, out[0], out[1], margin)) clampToBlob(f, out[0], out[1], margin, out);
 }
 function gotoInBlob(i, f, next) {
-  blobInterior(f, RAD[a_species[i]] + 0.9, _o);
+  const s = a_species[i];
+  blobInterior(f, RAD[s] + 0.9, _o);
+  if (WADE[s] === 1) {   // waders pick spots shallower than ~their sink cap (they may still cross the deepest part briefly)
+    const lim = HALF_H[s] * a_scale[i] * 0.9;
+    for (let k = 0; k < 4 && blobDepth(f, _o[0], _o[1]) * WADE_K > lim; k++) blobInterior(f, RAD[s] + 0.9, _o);
+  }
   gotoPoint(i, _o[0], _o[1], next);
+}
+// drinking at a water body: a point `inset` metres inside the shore (ankle-deep at the edge; buoyant species sometimes float out a little further)
+function gotoPoolDrink(i, f) {
+  const s = a_species[i], inset = BUOY[s] === 1 && _rand() < 0.5 ? 1.2 + _rand() * 1.5 : 0.3 + _rand() * 0.3;
+  blobPoint(f, _rand() * TWO_PI, 1 - inset / f.blob.rmin, _o, 0);
+  gotoPoint(i, _o[0], _o[1], A.DRINK);
+  a_wdrink[i] = 1;
+}
+function startDrink(i) {
+  const s = a_species[i], f = DPOOL[s], tr = PENS[s].water;
+  a_wdrink[i] = 0;
+  if (f !== null) {
+    const px = a_px[i], pz = a_pz[i];
+    // nearer source is more likely (P(pool) = dT / (dT + dP), clamped to 30..70 % so both are used: a big pond would otherwise take every drinker)
+    const dT = Math.hypot(px - tr.x, pz - tr.z), dP = Math.max(0.5, Math.hypot(px - f.x, pz - f.z) - 0.5 * (f.blob.rmin + f.blob.rmax));
+    let pp = dT / (dT + dP); pp = pp < 0.3 ? 0.3 : pp > 0.7 ? 0.7 : pp;
+    if (_W.pen_water[s] <= 0.05 || _rand() < pp) { gotoPoolDrink(i, f); return; }
+  }
+  gotoFeatureEdge(i, tr, A.DRINK);
 }
 function gotoShore(i, f, next) {   // a point just outside the actual outline
   const rad = RAD[a_species[i]];
@@ -431,7 +489,7 @@ function enter(i, st) {
     case A.FREEZE: d = 2 + r * 3; break;
     case A.LAY: d = 4 + r * 4; break;
     case A.DUSTBATH: d = 6 + r * 6; break;
-    case A.WALLOW: d = 10 + r * 20; break;
+    case A.WALLOW: d = 15 + r * 45; break;
     case A.DISPLAY: d = 6 + r * 6; wanderTarget(i); break;
     case A.ROLL: d = 3 + r * 2; break;
     case A.DUNG: d = 3; break;
@@ -443,7 +501,7 @@ function enter(i, st) {
     case A.HOP: {
       d = 0.5 + r; const a = _rand() * TWO_PI; setTarget(i, a_px[i] + Math.sin(a) * 3, a_pz[i] + Math.cos(a) * 3); break;
     }
-    case A.SWIM: d = 10 + r * 20; pondTarget(i); break;
+    case A.SWIM: d = 15 + r * 45; pondTarget(i); break;
     case A.FLOCK: d = 3 + r * 3; break;
     case A.TROT: d = 10 + r * 10; break;
     case A.FLEE: d = 2 + r * 1.5; break;
@@ -520,9 +578,9 @@ function decide(i) {
     if (st === A.SLEEP) enter(i, A.SLEEP); else goSleep(i);
     return;
   }
-  const hot = a_hunger[i] > NEED_THRESH && W.pen_food[s] > 0.05, thirsty = a_thirst[i] > NEED_THRESH && W.pen_water[s] > 0.05;
+  const hot = a_hunger[i] > NEED_THRESH && W.pen_food[s] > 0.05, thirsty = a_thirst[i] > NEED_THRESH && (W.pen_water[s] > 0.05 || DPOOL[s] !== null);
   if (hot || thirsty) {
-    if (thirsty && (!hot || a_thirst[i] > a_hunger[i])) gotoFeatureEdge(i, PENS[s].water, A.DRINK);
+    if (thirsty && (!hot || a_thirst[i] > a_hunger[i])) startDrink(i);
     else gotoFeatureEdge(i, PENS[s].feeder, A.EAT);
     return;
   }
@@ -535,12 +593,12 @@ function decide(i) {
   if (a_energy[i] < 0.2 && HAS_REST[s]) { enter(i, A.REST); return; }
   const ts = TS[s], tw = TW[s];
   let tot = TTOT[s];
-  const wallowBoost = NOON[s] === 1 && W.hour >= 11 && W.hour < 16;
-  if (wallowBoost) tot += 0.25;
+  const bell = NOON[s] === 1 ? noonBell(W.hour) : 0, wBoost = 1 + 1.5 * bell;   // cool-down: SWIM / WALLOW weight x(1..2.5) peaking at 13:00
+  if (bell > 0) tot += TWATER[s] * 1.5 * bell;
   let r = _rand() * tot, c = ts[ts.length - 1];
   for (let k = 0; k < ts.length; k++) {
     let w = tw[k];
-    if (wallowBoost && ts[k] === A.WALLOW) w *= 2;
+    if (bell > 0 && (ts[k] === A.WALLOW || ts[k] === A.SWIM)) w *= wBoost;
     r -= w;
     if (r <= 0) { c = ts[k]; break; }
   }
@@ -581,7 +639,8 @@ function slowStep(i, s, st, fl, tick, night) {
       if (W.pen_food[s] > 0.001) { hunger -= EAT_RATE * dt2; tEat[s] += 2; if (hunger <= 0.02) { hunger = hunger < 0 ? 0 : hunger; a_stateTime[i] = 0; } }
       else a_stateTime[i] = 0;
     } else if (st === A.DRINK) {
-      if (W.pen_water[s] > 0.001) { thirst -= EAT_RATE * dt2; tDrink[s] += 2; if (thirst <= 0.02) { thirst = thirst < 0 ? 0 : thirst; a_stateTime[i] = 0; } }
+      if (W.a_wdrink[i] === 1) { thirst -= EAT_RATE * dt2; if (thirst <= 0.02) { thirst = thirst < 0 ? 0 : thirst; a_stateTime[i] = 0; } }   // water body: infinite, does not drain the trough stock
+      else if (W.pen_water[s] > 0.001) { thirst -= EAT_RATE * dt2; tDrink[s] += 2; if (thirst <= 0.02) { thirst = thirst < 0 ? 0 : thirst; a_stateTime[i] = 0; } }
       else a_stateTime[i] = 0;
     } else if (st === A.GRAZE && IS_HAY[s]) hunger -= GRAZE_RELIEF * dt2;
     if (hunger > 1) hunger = 1; else if (hunger < 0) hunger = 0;
@@ -704,6 +763,33 @@ function slowStep(i, s, st, fl, tick, night) {
   return st;
 }
 
+// ------------------------------------------------------------------ water: vertical spring (a_wy)
+// Waders: target = -min(depth * WADE_K, SINK_CAP * height * scale); buoyant: +FLOAT_LIFT once the water is deeper than 5 cm. Target evaluated on the slow parity and only
+// for animals inside the blob's bounding circle; the critically damped spring (omega 6/s) runs every tick for animals that are not at rest at 0. Hard-clamped to the cap.
+function waterStep(i, s, px, pz, slow, dt) {
+  let tgt = wTgt[i];
+  if (slow) {
+    tgt = 0;
+    const dx = px - WCX[s], dz = pz - WCZ[s];
+    if (dx * dx + dz * dz < WR2[s]) {
+      const d = depthAt(s, px, pz);
+      if (d > 0) {
+        if (BUOY[s] === 1) tgt = d >= 0.05 ? FLOAT_LIFT : d * (FLOAT_LIFT * 20);
+        else { const cap = HALF_H[s] * a_scale[i]; let sk = d * WADE_K; if (sk > cap) sk = cap; tgt = -sk; }
+      }
+    }
+    wTgt[i] = tgt;
+  }
+  const wy0 = a_wy[i]; let v = a_wvy[i];
+  if (tgt === 0 && wy0 === 0 && v === 0) return;
+  v += (WK * (tgt - wy0) - WC * v) * dt;
+  let wy = wy0 + v * dt;
+  const lo = BUOY[s] === 1 ? 0 : -HALF_H[s] * a_scale[i], hi = BUOY[s] === 1 ? FLOAT_LIFT : 0;
+  if (wy < lo) { wy = lo; if (v < 0) v = 0; } else if (wy > hi) { wy = hi; if (v > 0) v = 0; }
+  if (tgt === 0 && wy < 1e-4 && wy > -1e-4 && v < 1e-3 && v > -1e-3) { wy = 0; v = 0; }
+  a_wy[i] = wy; a_wvy[i] = v;
+}
+
 // ------------------------------------------------------------------ main update
 export function updateAnimals(W, dt) {
   const n = W.animalCount;
@@ -714,7 +800,7 @@ export function updateAnimals(W, dt) {
   a_tx = W.a_tx; a_tz = W.a_tz; a_stateTime = W.a_stateTime; a_animT = W.a_animT; a_gait = W.a_gait; a_scale = W.a_scale;
   a_hunger = W.a_hunger; a_thirst = W.a_thirst; a_energy = W.a_energy; a_produce = W.a_produce; a_health = W.a_health;
   a_species = W.a_species; a_state = W.a_state; a_next = W.a_next; a_flags = W.a_flags; a_variant = W.a_variant;
-  a_leader = W.a_leader; a_heldBy = W.a_heldBy; a_seed = W.a_seed; hash = W.hash;
+  a_leader = W.a_leader; a_heldBy = W.a_heldBy; a_seed = W.a_seed; hash = W.hash; a_wy = W.a_wy; a_wvy = W.a_wvy; a_wdrink = W.a_wdrink;
   const rand = _rand, tick = _tick, night = _night;
   const f_px = W.f_px, f_pz = W.f_pz;
 
@@ -767,7 +853,8 @@ export function updateAnimals(W, dt) {
       // early-out: resting / pecking / sleeping animals with no velocity do no integration at all
     } else {
       const sv = 0.88 + ((a_seed[i] >>> 3) & 15) * 0.016;
-      const sp = (WALK[s] * wf + RUN[s] * rf) * sv;
+      let sp = (WALK[s] * wf + RUN[s] * rf) * sv;
+      if (WADE[s] === 1) { const w = a_wy[i]; if (w < 0) sp *= 1 + 0.45 * w / (HALF_H[s] * a_scale[i]); }   // wading: up to -45% when sunk to the cap
       let dvx = 0, dvz = 0;
       if (sp > 0) {
         const ex = a_tx[i] - px, ez = a_tz[i] - pz, d2 = ex * ex + ez * ez;
@@ -845,7 +932,7 @@ export function updateAnimals(W, dt) {
       let tgtH = a_heading[i], turn = false;
       if (spd > 0.08) { tgtH = atan2f(a_vx[i], a_vz[i]); turn = true; }
       else if (st === A.EAT || st === A.DRINK) {
-        const f = st === A.EAT ? PENS[s].feeder : PENS[s].water;
+        const f = st === A.EAT ? PENS[s].feeder : a_wdrink[i] === 1 ? DPOOL[s] : PENS[s].water;
         tgtH = Math.atan2(f.x - px, f.z - pz); turn = true;
       } else {
         const L = a_leader[i];
@@ -866,6 +953,7 @@ export function updateAnimals(W, dt) {
     const ty = s === SP.GOAT ? terrainHeight(px, pz) : (st === A.SWIM ? WATER_Y - 0.15 : 0);
     const py = a_py[i];
     if (py !== ty) a_py[i] = py + (ty - py) * Math.min(1, dt * 10);
+    if (WON[s] === 1 && (slow || a_wy[i] !== 0 || a_wvy[i] !== 0)) waterStep(i, s, px, pz, slow, dt);
   }
 
   // ---- pen aggregates + resource drain + manure + sickness

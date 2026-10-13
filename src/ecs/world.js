@@ -10,8 +10,9 @@ import { allocTrucks, releaseLoadJob } from '../sim/trucks.js';
 
 const TWO_PI = Math.PI * 2;
 const ANIMAL_F32 = ['a_px','a_py','a_pz','a_ppx','a_ppy','a_ppz','a_vx','a_vz','a_heading','a_pheading','a_speed',
-  'a_tx','a_tz','a_stateTime','a_animT','a_gait','a_scale','a_hunger','a_thirst','a_energy','a_produce','a_health'];
-const ANIMAL_U8 = ['a_species','a_state','a_next','a_flags','a_variant'];
+  'a_tx','a_tz','a_stateTime','a_animT','a_gait','a_scale','a_hunger','a_thirst','a_energy','a_produce','a_health',
+  'a_wy','a_pwy','a_wvy'];   // a_wy: vertical water offset (m): <= 0 wader sunk below the surface (never below -0.5 x body height), >= 0 buoyant float lift (<= FLOAT_LIFT); a_pwy: previous tick (render lerp); a_wvy: spring velocity
+const ANIMAL_U8 = ['a_species','a_state','a_next','a_flags','a_variant','a_wdrink'];   // a_wdrink: 1 = this DRINK / GOTO->DRINK targets a water body (pond / oasis / spring) instead of the trough
 // every animal array, for swap-remove
 const ANIMAL_ALL = [...ANIMAL_F32, ...ANIMAL_U8, 'a_leader', 'a_heldBy', 'a_seed'];
 
@@ -173,9 +174,9 @@ const _p2 = new Float32Array(2);
 // ------------------------------------------------------------------ clock
 export function snapshotPrev(W) {
   const n = W.animalCount;
-  const { a_px, a_py, a_pz, a_ppx, a_ppy, a_ppz, a_heading, a_pheading } = W;
+  const { a_px, a_py, a_pz, a_ppx, a_ppy, a_ppz, a_heading, a_pheading, a_wy, a_pwy } = W;
   for (let i = 0; i < n; i++) {
-    a_ppx[i] = a_px[i]; a_ppy[i] = a_py[i]; a_ppz[i] = a_pz[i]; a_pheading[i] = a_heading[i];
+    a_ppx[i] = a_px[i]; a_ppy[i] = a_py[i]; a_ppz[i] = a_pz[i]; a_pheading[i] = a_heading[i]; a_pwy[i] = a_wy[i];
   }
   const m = W.farmerCount;
   const { f_px, f_pz, f_ppx, f_ppz, f_heading, f_pheading } = W;
@@ -279,7 +280,7 @@ export function spawnAnimal(W, species) {
   W.a_variant[i] = (rand() < 0.5 ? 1 : 0) | (((rand() * 8) | 0) << 1);
   W.a_px[i] = W.a_ppx[i] = _p2[0]; W.a_pz[i] = W.a_ppz[i] = _p2[1];
   W.a_py[i] = W.a_ppy[i] = species === 4 ? terrainHeight(_p2[0], _p2[1]) : 0;
-  W.a_vx[i] = 0; W.a_vz[i] = 0; W.a_speed[i] = 0;
+  W.a_vx[i] = 0; W.a_vz[i] = 0; W.a_speed[i] = 0; W.a_wy[i] = W.a_pwy[i] = W.a_wvy[i] = 0; W.a_wdrink[i] = 0;
   W.a_heading[i] = W.a_pheading[i] = (rand() * 2 - 1) * Math.PI;
   W.a_tx[i] = _p2[0]; W.a_tz[i] = _p2[1];
   W.a_stateTime[i] = 0.5 + rand() * 2.5; W.a_animT[i] = 0; W.a_gait[i] = rand();
