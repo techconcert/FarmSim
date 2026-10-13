@@ -4,11 +4,25 @@ Local web app: raw WebGL2, ES modules, no bundler and no runtime dependencies. S
 struct-of-arrays typed arrays (DOTS-style). Systems loop over dense arrays, with no per-entity objects and no allocation
 in hot loops. Rendering uses hardware-instanced draws (one draw per part type and LOD tier).
 
+Threads: the main thread renders and handles input. The simulation runs in a module worker that owns the world and
+sends snapshots back. On a cross-origin isolated page, the animal update is also split by pen across up to three helper
+workers that share the world's arrays.
+```
+main thread (main.js)            sim worker (sim/worker.js)              animal workers (sim/animalWorker.js)
+  render, HUD, QA      <-- snapshot (transferred ArrayBuffer) --   owns W, runs the tick       <-- SharedArrayBuffer W
+  'step n' / commands  -->                                         animals split by pen -->        animalsStep(mask)
+```
+
 Scale: 20 species, up to 10,000 animals, up to 200 farmers, 20 pens, 4 farm trucks at most. Target: 60 fps on a
-real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detail budget at the maximum.
+real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detail budget at the maximum. Measured on an
+Apple A18 Pro in Chrome with raised caps, it holds 30 fps up to 60,000 animals + 12,000 farmers (README, Stress test
+results).
 
 ## 0. Ground rules
-- `src/config.js`, `src/ecs/*`, `src/sim/*` do not touch the DOM or WebGL, so they run under Node for unit tests.
+- `src/config.js`, `src/ecs/*`, `src/sim/*` do not touch the DOM or WebGL, so they run under Node for unit tests and in
+  workers.
+- The main thread never mutates the simulation in worker mode. Count changes, hour changes and truck spawns are commands
+  sent to the worker, and they show in `W` once the next snapshot arrives.
 - Units: 1 unit = 1 m, y up, ground at y = 0. The world is `WORLD` (x ∈ [-176, 176], z ∈ [-160, 160]).
 - Heading θ: forward = (sin θ, 0, cos θ), θ = atan2(vx, vz). Models face local +Z.
 - Pen index equals species index.
@@ -18,6 +32,9 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
 ## 1. Constants and data (`src/config.js`)
 - `WORLD`, `PEN_COUNT = 20`, `SPECIES_COUNT = 20`, `MAX_ANIMALS = 10000`, `DEFAULT_ANIMALS = 3000`,
   `MAX_FARMERS = 200`, `DEFAULT_FARMERS = 40`, `MAX_ITEMS = 4096`, `MAX_TASKS = 512`.
+- Caps can be raised by the stress harness: the page sets `globalThis.__FARM_CAPS` before any module loads, and workers
+  receive the same caps through their script URL (`?caps=...`, built by `CAPS_QUERY`), so every thread sizes its arrays
+  the same way.
 - `SIM_DT = 1/30`, `MAX_STEPS_PER_FRAME = 8`, `DAY_LENGTH_SEC = 600`.
 - `Species` enum (0–9 original, 10–19 donkey, goose, alpaca, deer, ostrich, yak, buffalo, peacock, camel, capybara).
 - `SPECIES[s]`: `name, legs, radius, walk, run, height, diet ('grain' | 'hay'), produce (ItemKind | -1), share, color,
@@ -35,7 +52,8 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
 - `HUBS` (x = ±130), `ROAD`, `BUILDINGS`: the yard, barn, silo, well, farmhouse, storehouse, compost and vet shed.
 
 ## 2. ECS world (`src/ecs/`)
-- `rng.js`: seeded RNG. `spatialHash.js`: counting-sort grid, rebuilt each tick, `buildHash`, `queryHash`.
+- `rng.js`: seeded RNG. `spatialHash.js`: counting-sort grid, rebuilt each tick, `buildHash`, `queryHash`. Used for the
+  animal neighbour queries (2 m cells) and the farmer separation grid (4 m cells).
 - `world.js`: `createWorld({seed})` returns a plain object of typed arrays sized to capacity.
   - Animals (dense `[0, animalCount)`): `a_species`, `a_state`, `a_variant` (bit 0 male, bits 1–3 colour slot),
     position, velocity, heading, speed, target, needs (hunger, thirst), state timers, flags.
@@ -48,7 +66,10 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
 - `setAnimalCount`: keeps the species mix at the shares in `SPECIES`. `setFarmerCount`: spreads the four types evenly.
 
 ## 3. Simulation (`src/sim/`)
-- `animals.js` `updateAnimals(W, dt)`:
+- `animals.js` `updateAnimals(W, dt)` = `animalsStep(W, dt, null)` + `animalsEnd(W, dt)`. `animalsStep` is the
+  per-animal loop and takes an optional species mask, so a thread can run only its own pens. `animalsEnd` turns the
+  per-species tallies (`animalTallies`) into pen totals (counts, ready, sick, food and water drain, manure, sickness
+  outbreaks) and always runs on one thread. Item spawns go through `setItemSpawner`, so helper threads can queue them.
   - Needs (hunger, thirst) drain over time. At thresholds, animals seek a feeder, water, a bath, a wallow, a sleep area
     or a nest, or wander, graze, peck or rest, weighted by species and time of day.
   - Movement: desired velocity toward the target, with separation from nearby animals, and steering around solids.
@@ -68,11 +89,27 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
   with mask deduplication, then lets idle farmers claim them every 0.1 s. Loading jobs for trucks are offered here too.
 - `farmers.js` `updateFarmers(W, dt)`: runs each farmer's task script (move, pick up, work, drop off), wandering, leaning
   at gates and resting. Farmers route around trees and solids. Loading scripts walk the storehouse door to the truck tail.
+  Separation between farmers looks up close pairs in a 4 m spatial grid (`sepHash`), each pair once, with the same push
+  as before.
 - `nav.js` `buildRoute(W, f, x, z, pen)`: road → hub → service lane → gate → pen destination. Adds detour waypoints
   (up to two nested levels) around any solid circle a segment crosses, with a 0.6 m clearance.
 - `trucks.js`: four visit kinds (pickup, van, tanker). Trucks drive in the east lane, reverse into the bay and load
   from farmers. They depart once full, or after a fallback timer, when they fall back to the automatic load.
   Trucks dispatch only between 06:30 and 19:30. Manual `spawnTruck` ignores this.
+- `worker.js`: the simulation worker. Messages: `init {seed, animals, farmers, dt, threads}` → `ready`;
+  `step {n, buf, dayCycle}` runs n ticks and returns `snap {buf, s}` with the buffer transferred; `cmd {op: animals |
+  farmers | hour | truck, v}` → `cmd {r}`. It reports `W.simTickMs`, `W.simAnimalsMs` (moving averages) and
+  `W.simThreads`.
+- `snapshot.js`: `snapshotLayout(W)` lays out every typed array the main thread reads (8-byte aligned), `writeSnapshot`
+  copies only live entries (animals and farmers to their counts, items and tasks to their high-water marks) and returns
+  the scalar state, and `readSnapshot` re-points the main thread's `W` at the new buffer.
+- `parallel.js` `createAnimalPool(W, seed, threads)`: moves `W`'s typed arrays into `SharedArrayBuffer`s, starts the
+  helpers and assigns species to threads greedily by count. Each tick it sets the shared scalars, bumps a generation
+  counter (`Atomics.notify`), runs its own share, waits for the helpers, merges their tallies, applies their queued egg
+  and manure spawns (keeping the manure cap), then runs `animalsEnd`. It returns null, and the single-threaded path is
+  used, when the page is not cross-origin isolated or `threads` is 0.
+- `animalWorker.js`: a helper loop that waits on the generation counter and runs `animalsStep` for its species with its
+  own random stream.
 
 ## 4. Rendering (`src/render/`)
 - `gl.js`: `createGL(canvas) → G`. Instanced meshes (`createMesh`, `createStaticMesh`, `createShadowMesh`) with per-instance
@@ -85,6 +122,8 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
   `NSP = 20`, `SPECIES_NAMES`, and `RIG[s]` (graze pitch, neck, legs, radius, outline width).
 - `units.js`: animals, farmers, items, gates (all 20 pens), and shadows. Three tiers by distance:
   near (outlined) within `lodDist`, far (no outline) out to `lodDist × blobK`, and a shared 28-triangle blob beyond that.
+  The blob mesh uses compact instances (`createMesh(..., {compact: true})`, stride 8: position, cos and sin of yaw,
+  scale xyz). The vertex shader rebuilds the matrix when `uCompact` is set; other meshes keep the 16-float matrix.
   Culling uses per-instance sphere tests against the frustum, plus fog distance. An adaptive controller shrinks
   `lodDist` (to a 25 m floor) when triangles pass 2.5 M or draw calls pass 120, and recovers towards 110 m.
 - `environment.js`, `envBuild.js`, `envTerrain.js`, `envBiomes.js`: static world. Ground and hills follow `WORLD`.
@@ -96,14 +135,30 @@ real GPU at the default load (3,000 animals, 40 farmers), with an adaptive detai
 
 ## 5. Interface and QA
 - `index.html`, `styles.css`, `src/main.js`: canvas, HUD and boot. A boot error shows an on-screen panel with the stack.
+  `main.js` keeps a local `W` built from the same seed as the worker and re-points it at each snapshot. Each frame it
+  requests the due ticks as one batch while the worker is idle (capped at `MAX_STEPS_PER_FRAME`) and draws the latest
+  snapshot. `?worker=0` runs the old main-thread loop; `?threads=N` sets the helper count (default
+  `hardwareConcurrency − 3`, clamped to 0–3).
+- `serve.py` sends no-cache plus `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy:
+  require-corp`. Without isolation `SharedArrayBuffer` is missing and the animal threads stay off.
 - `src/ui/hud.js`: stats panel and sliders (animals 0–10,000, farmers 0–200).
-- `src/qa.js`: `window.__farm` hooks (see README).
+- `src/qa.js`: `window.__farm` hooks: `getStats`, `setAnimalCount`, `setFarmerCount`, `setSpeed`, `pause`, `resume`,
+  `setCamera`, `setHour`, `spawnTruck`, `stepSim(seconds)`, plus `W`, `G` and `units`. In worker mode the setters and
+  `stepSim` return promises that settle once a snapshot taken after the change is in `W`. Frame stats include `simMs`
+  (worker time for the ticks requested that frame), `renderMs` and `simSteps`.
+- `stress/`: the GPU stress harness. `index.html` raises the caps, `harness.js` ramps counts and measures four camera
+  shots per step until the worst shot is under 30 fps, `serve.py` serves with isolation headers and saves results to
+  `stress/results/`, and `run_headless.mjs` is a headless plumbing check.
 - Tests: `tests/*.test.mjs` (unit, under Node), `tests/smoke.mjs` (headless Chromium + SwiftShader, default load,
   checks for NaN, errors, task completion, truck visits and farmer loads), `tests/bench.mjs` (sim tick timing).
 
 ## 6. Known limits
-- Real-GPU frame rate at 10,000 animals and 200 farmers is unverified. Headless SwiftShader numbers are not representative.
-- Sim tick at 10,000 / 200 averages about 3.4 ms in Node, with occasional V8 deopt spikes of up to about 18 ms.
+- Real-GPU numbers come from one machine (Apple A18 Pro, Chrome). Headless SwiftShader numbers are not representative.
+- Single-threaded sim tick at 10,000 / 200 averages about 3.5–5 ms in Node, with occasional V8 deopt spikes of up to
+  about 18 ms.
+- Animal threads scale less than linearly: animals of different species are interleaved in memory, so threads share
+  cache lines. Sorting animals by species would help, at the cost of changing index order.
+- Farmer and carrier indices (`i_carrier`, `t_farmer`) are 16-bit, which limits farmers to 32,767.
 - The yak and palm fronds are the weakest visual assets. Willow was reworked to round lobes in the latest pass.
 - Integration risks: stale animal indices after count changes; heading convention mismatch; forgetting to upload
   instance buffers (`M.upload()`); arrays sized to capacity but only the live count drawn.

@@ -96,7 +96,8 @@ palette. Everything in the world should read as made by the same hand. Animals m
 - **Clear lanes.** Trucks use a dedicated gravel service lane east of the buildings, clear of pens and farmer routes.
   Service lanes between pen rows keep farmer traffic away from animals.
 - **Density.** Crowds are readable at the default camera: about 3,000 animals and 40 farmers. At 10,000 animals and
-  200 farmers the renderer lowers detail distance to hold the budget.
+  200 farmers the renderer lowers detail distance to hold the budget. Far crowds (tens of thousands in the stress
+  test) read as the shared blob silhouette, so the blob must stay recognisable as an animal at a glance.
 
 ## 6. Do / don't
 - Do keep every new object **rounded, outlined and cel-banded**, except flat ground, sand, snow and decals.
@@ -115,3 +116,7 @@ palette. Everything in the world should read as made by the same hand. Animals m
 - Whole scene at the default camera: 1M triangles or less. The adaptive controller targets 2.5M triangles and 120 draw
   calls at most.
 - Keep draw calls per species to the visible variants, not the species count. Shadows are one instanced draw.
+- Blob-tier instances are compact (8 floats: position, yaw, scale), so blob shapes must work with yaw-only rotation and
+  per-axis scale; no tilt or skew.
+- Measured on an Apple A18 Pro: the adaptive controller holds 30 fps or more up to 5–6M triangles at the stress limits.
+  The default load stays at about 1M triangles and 60 fps.

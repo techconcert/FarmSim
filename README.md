@@ -2,7 +2,9 @@
 
 **A living low-poly farm, rendered in raw WebGL2 with zero dependencies.**
 Twenty animal species in twenty fenced pens, up to 10,000 animals and 200 farmers doing their own chores, trucks that
-arrive, get loaded by the farmers and leave, all in a cel-shaded, inked cartoon style.
+arrive, get loaded by the farmers and leave, all in a cel-shaded, inked cartoon style. The simulation runs off the main
+thread and splits the animals across cores. In the stress test it held 30 fps at 60,000 animals plus 12,000 farmers,
+109,000 animals alone, or 19,500 farmers (see [Stress test results](#stress-test-results)).
 
 ![The farm overview](docs/screenshots/overview.png)
 
@@ -10,12 +12,22 @@ Dedicated to the public domain under [CC0 1.0](LICENSE).
 
 ## Quick start
 ```
-python3 serve.py            # http://localhost:8080/  (no-cache dev server; use this, not http.server)
-npm run test:unit           # simulation, ECS, farmer, obstacle, rig and truck tests (Node, no browser)
+python3 serve.py            # http://localhost:8080/  (no-cache, cross-origin isolated dev server; use this, not http.server)
+npm run test:unit           # simulation, ECS, farmer, obstacle, rig, truck and water tests (Node, no browser)
 npm run test:e2e            # headless Chromium smoke test (Playwright + SwiftShader)
 npm run bench               # simulation tick timing at 2k / 5k / 10k animals
+python3 stress/serve.py     # stress harness: open http://localhost:8090/stress/?autostart=1 on a real GPU
 ```
 No install step, no bundler, no runtime dependencies. Node is only needed for the tests.
+
+**Hosting.** Any static server works, but the multi-threaded animal update needs a cross-origin isolated page, which
+means serving every file with these two headers (both `serve.py` files already send them):
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+Without them the game still runs, with the simulation in one worker thread. URL options for testing: `?worker=0` runs
+the simulation on the main thread as before, `?threads=N` sets the number of extra animal threads (`0` turns them off).
 
 ## What it is
 FarmSim is a technical demo of a data-oriented farm simulation with a hand-written renderer. Animals have needs and
@@ -59,10 +71,22 @@ stand in most pens, and the animals and farmers route around them.
 | Desert: an oasis with a reed fringe, palms and a camel herd | Willows: domed crowns over soft, rounded skirts |
 
 ## Technical highlights
-- **Scale.** 20 species, up to 10,000 animals and 200 farmers. The default load is 3,000 animals and 40 farmers.
+- **Scale.** 20 species, up to 10,000 animals and 200 farmers in the game (the stress harness lifts the caps). The
+  default load is 3,000 animals and 40 farmers.
 - **Simulation without a renderer.** The sim (`src/config.js`, `src/ecs/`, `src/sim/`) has no DOM or WebGL and runs under
-  Node. It can be tested and benchmarked on its own. Measured in Node at 10,000 animals and 200 farmers: about 3.4 ms
-  average per 1/30 s tick, with occasional garbage-collection spikes.
+  Node. It can be tested and benchmarked on its own. Measured single-threaded in Node at 10,000 animals and 200 farmers:
+  about 3.5–5 ms per 1/30 s tick depending on the machine, with occasional garbage-collection spikes.
+- **Simulation in a Web Worker.** The fixed 30 Hz simulation runs in a module worker (`src/sim/worker.js`) that owns the
+  world. Each frame the main thread asks for the ticks that are due and draws the latest snapshot meanwhile, so frame
+  time is the slower of simulation and rendering rather than their sum. Snapshots (`src/sim/snapshot.js`) are two
+  `ArrayBuffer`s that ping-pong between the threads as transferables, copying only live entities, with no allocation per
+  frame.
+- **Animals split across cores.** Animals never leave their pen and only look at their own species, so the per-animal
+  update is split by pen across up to four threads (`src/sim/parallel.js`, `src/sim/animalWorker.js`) that share the
+  world's arrays through `SharedArrayBuffer` and synchronise with `Atomics`. Egg and manure spawns from helper threads
+  are queued and applied on the simulation thread, and the per-pen totals stay single-threaded.
+- **Farmer separation on a grid.** Farmers push apart only when closer than their separation radius, found through a
+  4 m spatial grid instead of testing every pair, so cost grows with the number of farmers rather than its square.
 - **Data-oriented ECS.** Struct-of-arrays typed arrays for animals, farmers, items, tasks and pens. Dense arrays, no
   per-entity objects, and no allocation in the hot loops. A counting-sort spatial hash, rebuilt every tick, gives
   neighbour queries.
@@ -80,6 +104,8 @@ stand in most pens, and the animals and farmers route around them.
   stair-stepped patterns.
 - **Three LOD tiers and an adaptive budget.** Near, far (one coarse mesh per species) and a shared blob beyond that.
   If the frame exceeds 2.5 M triangles or 120 draw calls, the near-detail distance shrinks smoothly, then recovers.
+  Blob-tier instances only turn about the vertical axis, so they upload 8 floats (position, yaw, scale) instead of a
+  full 4 × 4 matrix and the vertex shader rebuilds the matrix, which halves instance upload for distant crowds.
 - **Boot diagnostics.** A failed start shows the stack trace on screen instead of a blank page.
 
 ## Best practices
@@ -87,12 +113,16 @@ stand in most pens, and the animals and farmers route around them.
   that wires them together. Each module owns its files.
 - **Zero allocation in hot loops.** Scratch typed arrays are module-level. Systems cache arrays in locals.
 - **Seeded randomness.** Worlds are reproducible from a seed, which makes failures repeatable in tests.
-- **Test at three levels.** Unit tests on the simulation under Node (world, animals, farmers, obstacles, rig, trucks);
-  a headless browser smoke test on the real app with no console errors allowed; and a benchmark that tracks tick cost.
+- **Test at four levels.** Unit tests on the simulation under Node (world, animals, farmers, obstacles, rig, trucks,
+  water); a headless browser smoke test on the real app with no console errors allowed; a benchmark that tracks tick
+  cost; and a stress harness that ramps the counts on a real GPU until the frame rate drops below 30 fps.
+- **Same results single- or multi-threaded.** The single-threaded animal update is bit-identical to the original
+  (checked by hashing positions after 1,800 ticks), and the worker and main-thread modes pass the same smoke test.
 - **One design language, written down.** `DESIGN_LANGUAGE.md` holds the palette, outline widths, decal rules and
   performance budgets, so new assets stay consistent.
 - **Honest performance notes.** Measured numbers are labelled with where they were measured.
-- **Dev server with no-cache headers.** Module edits are picked up on refresh without stale mixes of old and new files.
+- **Dev server with no-cache and isolation headers.** Module edits are picked up on refresh without stale mixes of old
+  and new files, and the page is cross-origin isolated so `SharedArrayBuffer` is available.
 
 ## Stress test results
 Measured in Chrome 155 on an Apple A18 Pro (ANGLE Metal), 2008 × 1182 canvas at DPR 2, 60 Hz display, adaptive LOD on, with
@@ -224,8 +254,13 @@ fps per camera shot; sim (worker time per frame), render CPU and triangles are f
 </details>
 
 ## Known limits
-- The shipped caps are 10,000 animals and 200 farmers. The stress harness lifts them for its own page only.
-  Headless SwiftShader runs are not representative of a real GPU.
+- The shipped caps are 10,000 animals and 200 farmers. The stress harness lifts them for its own page only (farmer
+  and carrier indices are 16-bit in places, so it keeps farmers under 32,768). Headless SwiftShader runs are not
+  representative of a real GPU.
+- With extra animal threads, helper threads draw from their own random streams, so runs are statistically the same but
+  not bit-identical to single-threaded runs. Contagion checks (panic, trot) that look across a pen fence can see a
+  neighbour's state one tick early or late.
+- The stress results are single runs on one machine (Apple A18 Pro).
 - The yak and palm fronds are the weakest visual assets.
 - Trucks, cargo and loading work, but the economy is deliberately simple.
 
@@ -238,9 +273,11 @@ fps per camera shot; sim (worker time per frame), render CPU and triangles are f
 src/config.js        constants, species, pens, features, biome palettes
 src/ecs/             typed-array world, RNG, spatial hash          (no DOM, no WebGL)
 src/sim/             animals, tasks, farmers, navigation, trucks   (no DOM, no WebGL)
+src/sim/worker.js    simulation worker; snapshot.js world snapshots; parallel.js + animalWorker.js animal threads
 src/render/          GL engine, rigs, unit and environment renderers, trucks, camera
 src/ui/hud.js        overlay            src/qa.js  automation hooks
 tests/               unit, smoke and benchmark scripts
+stress/              GPU stress harness (index.html, harness.js, serve.py) and results/
 debug/               pages for inspecting the species lineup and environment
 ```
 
