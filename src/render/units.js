@@ -83,6 +83,12 @@ function copyMat(arr, k, from) {
   const o = k * 16, f = from * 16;
   for (let j = 0; j < 16; j++) arr[o + j] = arr[f + j];
 }
+// compact yaw-only instance (meshes created with { compact: true }): position, cos / sin of yaw, scale; see gl.js VS
+function putYaw(arr, k, px, py, pz, c, s, sx, sy, sz) {
+  const o = k * 8;
+  arr[o] = px; arr[o + 1] = py; arr[o + 2] = pz; arr[o + 3] = c;
+  arr[o + 4] = s; arr[o + 5] = sx; arr[o + 6] = sy; arr[o + 7] = sz;
+}
 function setTint(t, k, r, g, b) { const o = k * 3; t[o] = r; t[o + 1] = g; t[o + 2] = b; }
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -99,7 +105,8 @@ for (let s = 0; s < NSP; s++) {
 }
 
 const START_CAP = 64;      // initial instance capacity of every mesh (power of two; doubled on demand)
-const capOf = M => (M.capacity != null ? M.capacity : M.inst.length >> 4);
+const strideOf = M => M.stride || 16;
+const capOf = M => (M.capacity != null ? M.capacity : (M.inst.length / strideOf(M)) | 0);
 // make room for instance index k (keeps the first `live` instances); real GL meshes grow their buffers, mock meshes just swap arrays
 function ensure(M, k) {
   const cap = capOf(M);
@@ -108,8 +115,8 @@ function ensure(M, k) {
   while (nc <= k) nc *= 2;
   if (M.grow) M.grow(nc, k);
   else {
-    const oi = M.inst, ot = M.tint; M.inst = new Float32Array(nc * 16); M.tint = new Float32Array(nc * 3).fill(1);
-    M.inst.set(oi.subarray(0, Math.min(oi.length, k * 16))); M.tint.set(ot.subarray(0, Math.min(ot.length, k * 3))); M.capacity = nc;
+    const st = strideOf(M), oi = M.inst, ot = M.tint; M.inst = new Float32Array(nc * st); M.tint = new Float32Array(nc * 3).fill(1);
+    M.inst.set(oi.subarray(0, Math.min(oi.length, k * st))); M.tint.set(ot.subarray(0, Math.min(ot.length, k * 3))); M.capacity = nc;
   }
 }
 // water: per species buoyant (floats at the surface) / wader (sinks by a_wy, hard-capped at SINK_CAP x height) / mud wallow (lies down, mud tint)
@@ -144,7 +151,7 @@ export function createUnitRenderer(G, W) {
   }
   const LEGF = mk(buildLegFarGeo());
   const BLOBG = smoothen(ell(1, 1, 1, 0xffffff, 0, 0, 0, 7, 3));
-  const BLOB = mk(BLOBG);
+  const BLOB = G.createMesh(BLOBG, START_CAP, { compact: true }); meshes.push(BLOB);   // 8 floats per instance (yaw-only transform)
   const fg = buildFarmerGeos(), ffg = buildFarmerFarGeos();
   const FBODY = fg.bodies.map(g => mk(g, 0, 0.03));
   const FARM = fg.arms.map(g => mk(g, 0, 0.1));
@@ -275,13 +282,13 @@ export function createUnitRenderer(G, W) {
         smLie[i] = lieB; smHp[i] = 0; smHy[i] = 0;
         let dhB = a_heading[i] - a_pheading[i];
         dhB -= TWO_PI * Math.round(dhB / TWO_PI);
-        setBR(a_pheading[i] + dhB * alpha, 0, 0);
+        const yB = a_pheading[i] + dhB * alpha, cB = fcos(yB), sB = fsin(yB);   // yaw-only body rotation (same as setBR(yB, 0, 0))
         const viB = ((a_variant[i] >> 1) & 7) + s * 8, viB3 = viB * 3, bl = rg.blob, ac = VA[viB] === 1 ? rg.avgAlt : rg.avg;
         let ypB = py + (rg.bodyY * (1 - lieB) + rg.lieY * lieB) * sc - sink * (1 - 0.5 * lieB);
         if (flo > 0) { const yw = WATER_Y + rg.swimY * 0.55 * sc; ypB += (yw - ypB) * flo; }
         const ox = bl[3] * sc, oy = bl[4] * sc, oz = bl[5] * sc;
         if (nBlob >= capOf(BLOB)) ensure(BLOB, nBlob);
-        putBody(BLOB.inst, nBlob, x + BR[0] * ox + BR[3] * oy + BR[6] * oz, ypB + BR[1] * ox + BR[4] * oy + BR[7] * oz, z + BR[2] * ox + BR[5] * oy + BR[8] * oz, bl[0] * sc, bl[1] * sc, bl[2] * sc);
+        putYaw(BLOB.inst, nBlob, x + cB * ox + sB * oz, ypB + oy, z - sB * ox + cB * oz, cB, sB, bl[0] * sc, bl[1] * sc, bl[2] * sc);
         setTint(BLOB.tint, nBlob, ac[0] * VT[viB3], ac[1] * VT[viB3 + 1], ac[2] * VT[viB3 + 2]);
         nBlob++;
         if (flo < 0.3) { const o = nSh * 3; sd[o] = x; sd[o + 1] = z; sd[o + 2] = shadowK * rg.radius * sc * (sink > 0 ? 1 - 0.5 * sink / sinkCap : 1); nSh++; }

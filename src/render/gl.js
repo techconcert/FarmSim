@@ -18,15 +18,18 @@ uniform mat4 uProj;
 uniform vec3 uCam;
 uniform float uFogNear;
 uniform float uFogFar;
+uniform float uCompact;   // 1 = compact yaw instances: aM0 = (x, y, z, cos yaw), aM1 = (sin yaw, sx, sy, sz); aM2/aM3 unused
 out vec3 vNrm;
 out vec3 vCol;
 out vec3 vWP;
 out float vFog;
 void main(){
-  mat4 M = mat4(aM0, aM1, aM2, aM3);
+  mat4 M = uCompact > 0.5
+    ? mat4(vec4(aM0.w * aM1.y, 0.0, -aM1.x * aM1.y, 0.0), vec4(0.0, aM1.z, 0.0, 0.0), vec4(aM1.x * aM1.w, 0.0, aM0.w * aM1.w, 0.0), vec4(aM0.xyz, 1.0))
+    : mat4(aM0, aM1, aM2, aM3);
   vec4 wp = M * vec4(aPos, 1.0);
   // inverse-transpose for R*S: R * S^-1 * n  == mat3(M) * (n / s^2)
-  vec3 s2 = vec3(dot(aM0.xyz,aM0.xyz), dot(aM1.xyz,aM1.xyz), dot(aM2.xyz,aM2.xyz));
+  vec3 s2 = vec3(dot(M[0].xyz,M[0].xyz), dot(M[1].xyz,M[1].xyz), dot(M[2].xyz,M[2].xyz));
   vNrm = mat3(M) * (aNrm / max(s2, vec3(1e-8)));
   vCol = aCol * mix(aTint, vec3(1.0), aFix);
   vWP = wp.xyz;
@@ -196,7 +199,7 @@ function program(gl, vs, fs, names) {
 export function createGL(canvas) {
   const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, powerPreference: 'high-performance' });
   if (!gl) throw new Error('WebGL2 not available');
-  const main = program(gl, VS, FS, ['uView', 'uProj', 'uCam', 'uFogNear', 'uFogFar', 'uSunDir', 'uSunColor', 'uSky', 'uGround', 'uFogColor']);
+  const main = program(gl, VS, FS, ['uView', 'uProj', 'uCam', 'uFogNear', 'uFogFar', 'uCompact', 'uSunDir', 'uSunColor', 'uSky', 'uGround', 'uFogColor']);
   const outl = program(gl, OVS, OFS, ['uView', 'uProj', 'uCam', 'uFogNear', 'uFogFar', 'uWidth', 'uPx', 'uColor', 'uTone', 'uFogColor']);
   const shad = program(gl, SVS, SFS, ['uView', 'uProj', 'uCam', 'uFogNear', 'uFogFar']);
 
@@ -247,13 +250,15 @@ export function createGL(canvas) {
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
     for (let k = 0; k < 3; k++) { gl.enableVertexAttribArray(k); gl.vertexAttribPointer(k, 3, gl.FLOAT, false, 40, k * 12); }
     gl.enableVertexAttribArray(9); gl.vertexAttribPointer(9, 1, gl.FLOAT, false, 40, 36);
-    // instance matrices
+    // instance matrices: a full mat4 (16 floats), or with opts.compact a yaw-only transform (8 floats: x y z cos sin sx sy sz)
+    // that the vertex shader expands to the same matrix (half the per-instance writes and upload; no outline support)
+    const compact = !!(opts && opts.compact), stride = compact ? 8 : 16;
     const ibo = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, ibo);
-    gl.bufferData(gl.ARRAY_BUFFER, capacity * 64, gl.DYNAMIC_DRAW);
-    for (let k = 0; k < 4; k++) {
+    gl.bufferData(gl.ARRAY_BUFFER, capacity * stride * 4, gl.DYNAMIC_DRAW);
+    for (let k = 0; k < stride / 4; k++) {
       gl.enableVertexAttribArray(3 + k);
-      gl.vertexAttribPointer(3 + k, 4, gl.FLOAT, false, 64, k * 16);
+      gl.vertexAttribPointer(3 + k, 4, gl.FLOAT, false, stride * 4, k * 16);
       gl.vertexAttribDivisor(3 + k, 1);
     }
     // instance tint
@@ -265,7 +270,7 @@ export function createGL(canvas) {
     gl.vertexAttribDivisor(7, 1);
     // smooth normals for the outline hull (only when requested)
     let sbo = null;
-    const ow = opts && opts.outline ? (opts.outline === true ? 0.03 : Math.max(0, +opts.outline || 0)) : 0;
+    const ow = !compact && opts && opts.outline ? (opts.outline === true ? 0.03 : Math.max(0, +opts.outline || 0)) : 0;
     if (ow > 0) {
       sbo = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, sbo);
@@ -276,17 +281,17 @@ export function createGL(canvas) {
     gl.bindVertexArray(null);
 
     const M = {
-      vao, vbo, ibo, tbo, sbo, capacity, vertexCount: n,
+      vao, vbo, ibo, tbo, sbo, capacity, vertexCount: n, compact, stride,
       outline: ow, outlineColor: (opts && opts.outlineColor) ? Float32Array.from(opts.outlineColor) : new Float32Array([0.09, 0.07, 0.06]),
-      inst: new Float32Array(capacity * 16), tint: new Float32Array(capacity * 3).fill(1),
+      inst: new Float32Array(capacity * stride), tint: new Float32Array(capacity * 3).fill(1),
       count: 0, visible: true,
       // grow the instance capacity (callers pass a power of two); keeps the first `count` instances. The VAO keeps pointing at the same buffer objects.
       grow(newCap, live) {
         if (newCap <= M.capacity) return;
         const oi = M.inst, ot = M.tint, keep = Math.min(live == null ? M.count : live, M.capacity);
-        M.inst = new Float32Array(newCap * 16); M.tint = new Float32Array(newCap * 3).fill(1);
-        M.inst.set(oi.subarray(0, keep * 16)); M.tint.set(ot.subarray(0, keep * 3));
-        gl.bindBuffer(gl.ARRAY_BUFFER, ibo); gl.bufferData(gl.ARRAY_BUFFER, newCap * 64, gl.DYNAMIC_DRAW);
+        M.inst = new Float32Array(newCap * stride); M.tint = new Float32Array(newCap * 3).fill(1);
+        M.inst.set(oi.subarray(0, keep * stride)); M.tint.set(ot.subarray(0, keep * 3));
+        gl.bindBuffer(gl.ARRAY_BUFFER, ibo); gl.bufferData(gl.ARRAY_BUFFER, newCap * stride * 4, gl.DYNAMIC_DRAW);
         gl.bindBuffer(gl.ARRAY_BUFFER, tbo); gl.bufferData(gl.ARRAY_BUFFER, newCap * 12, gl.DYNAMIC_DRAW);
         M.capacity = newCap;
       },
@@ -294,12 +299,13 @@ export function createGL(canvas) {
         const c = Math.min(M.count, M.capacity);
         if (c <= 0) return;
         gl.bindBuffer(gl.ARRAY_BUFFER, ibo);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, M.inst, 0, c * 16);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, M.inst, 0, c * stride);
         gl.bindBuffer(gl.ARRAY_BUFFER, tbo);
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, M.tint, 0, c * 3);
       },
     };
-    for (let i = 0; i < capacity; i++) M.inst[i * 16] = M.inst[i * 16 + 5] = M.inst[i * 16 + 10] = M.inst[i * 16 + 15] = 1;
+    if (compact) for (let i = 0; i < capacity; i++) M.inst[i * 8 + 3] = M.inst[i * 8 + 5] = M.inst[i * 8 + 6] = M.inst[i * 8 + 7] = 1;
+    else for (let i = 0; i < capacity; i++) M.inst[i * 16] = M.inst[i * 16 + 5] = M.inst[i * 16 + 10] = M.inst[i * 16 + 15] = 1;
     G.meshes.push(M);
     return M;
   };
@@ -383,11 +389,14 @@ export function createGL(canvas) {
     { const lum = (G.skyColor[0] + G.skyColor[1] + G.skyColor[2] + G.groundColor[0] + G.groundColor[1] + G.groundColor[2]) / 6 + (G.sunColor[0] + G.sunColor[1] + G.sunColor[2]) / 3 * 0.5;
       gl.uniform1f(outl.u.uTone, Math.max(0.12, Math.min(1, lum * 2.2))); }   // outline darkens with the scene at night
     gl.useProgram(main.p);
+    gl.uniform1f(main.u.uCompact, 0);
+    let compactOn = false;
     const ms = G.meshes;
     for (let i = 0; i < ms.length; i++) {
       const M = ms[i];
       if (!M.visible || M.count <= 0) continue;
       const c = M.count < M.capacity ? M.count : M.capacity;
+      if (M.compact !== compactOn) { compactOn = M.compact; gl.uniform1f(main.u.uCompact, compactOn ? 1 : 0); }
       gl.bindVertexArray(M.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, M.vertexCount, c);
       info.calls++; info.instances += c; info.triangles += (M.vertexCount / 3 | 0) * c;
