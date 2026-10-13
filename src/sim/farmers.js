@@ -21,6 +21,7 @@ import {
 import {
   penOf, pushOutOfSolids, spawnItem, despawnItem, setItemState, completeTask, cancelTask, createTask, isNight, terrainHeight,
 } from '../ecs/world.js';
+import { createSpatialHash, buildHash } from '../ecs/spatialHash.js';
 import { buildRoute } from './nav.js';
 import { animalTargetOk } from './tasks.js';
 import { DOOR, setPreemptHook, truckLoadable, loadNeed, reserveLoad, deliverLoad, releaseLoadJob, truckRear } from './trucks.js';
@@ -31,6 +32,7 @@ const MAX_EGGS = 12, MAX_MANURE = 6, JOB_MAX_S = 150;
 const LOAD_ITEM = [ItemKind.EGG, ItemKind.MILK, ItemKind.WOOL];
 
 const stuck = new Float32Array(MAX_FARMERS);
+const sepHash = createSpatialHash(4, 180, MAX_FARMERS);   // farmer grid for separation: 4 m cells (90 x 90) keep the per-tick rebuild cheap at low counts
 const arrTol = new Float32Array(MAX_FARMERS);
 const oldX = new Float32Array(MAX_FARMERS), oldZ = new Float32Array(MAX_FARMERS);
 const lookX = new Float32Array(MAX_FARMERS), lookZ = new Float32Array(MAX_FARMERS);
@@ -541,18 +543,32 @@ export function updateFarmers(W, dt) {
     }
   }
 
-  // separation O(n^2)
+  // separation: only pairs closer than SEP_R push, so look them up in a uniform grid instead of testing every pair.
+  // Same pairs and the same push as the old O(n^2) loop; pairs are visited in grid order instead of index order.
   const m2 = SEP_R * SEP_R;
+  buildHash(sepHash, f_px, f_pz, nf);
+  const hCS = sepHash.cellStart, hIt = sepHash.items, hDim = sepHash.dim, hLast = hDim - 1, hInv = 1 / sepHash.cell, hHalf = sepHash.half;
   for (let i = 0; i < nf; i++) {
-    for (let j = i + 1; j < nf; j++) {
-      let dx = f_px[j] - f_px[i], dz = f_pz[j] - f_pz[i];
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= m2) continue;
-      let d = Math.sqrt(d2);
-      if (d < 1e-4) { dx = 1; dz = 0; d = 1; }
-      const push = (SEP_R - d) * 0.5 * 0.5 / d;   // half the overlap each, softened
-      f_px[i] -= dx * push; f_pz[i] -= dz * push;
-      f_px[j] += dx * push; f_pz[j] += dz * push;
+    let cx0 = ((f_px[i] - SEP_R + hHalf) * hInv) | 0, cx1 = ((f_px[i] + SEP_R + hHalf) * hInv) | 0;
+    let cz0 = ((f_pz[i] - SEP_R + hHalf) * hInv) | 0, cz1 = ((f_pz[i] + SEP_R + hHalf) * hInv) | 0;
+    if (cx0 < 0) cx0 = 0; if (cz0 < 0) cz0 = 0; if (cx1 > hLast) cx1 = hLast; if (cz1 > hLast) cz1 = hLast;
+    for (let cz = cz0; cz <= cz1; cz++) {
+      const row = cz * hDim;
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const e = hCS[row + cx + 1];
+        for (let k = hCS[row + cx]; k < e; k++) {
+          const j = hIt[k];
+          if (j <= i) continue;
+          let dx = f_px[j] - f_px[i], dz = f_pz[j] - f_pz[i];
+          const d2 = dx * dx + dz * dz;
+          if (d2 >= m2) continue;
+          let d = Math.sqrt(d2);
+          if (d < 1e-4) { dx = 1; dz = 0; d = 1; }
+          const push = (SEP_R - d) * 0.5 * 0.5 / d;   // half the overlap each, softened
+          f_px[i] -= dx * push; f_pz[i] -= dz * push;
+          f_px[j] += dx * push; f_pz[j] += dz * push;
+        }
+      }
     }
   }
 
