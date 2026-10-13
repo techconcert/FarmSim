@@ -3,7 +3,7 @@
 // run animalsStep for their own species on a World whose typed arrays live in SharedArrayBuffers. Item spawns from helpers
 // (eggs, manure) are queued and applied here, and the per-species tallies are merged before animalsEnd, which stays single-threaded.
 // Needs SharedArrayBuffer (a cross-origin isolated page: serve.py sends COOP / COEP); otherwise createAnimalPool returns null.
-import { SPECIES_COUNT, ItemKind } from '../config.js';
+import { SPECIES_COUNT, ItemKind, CAPS_QUERY } from '../config.js';
 import { spawnItem } from '../ecs/world.js';
 import { animalsStep, animalsEnd, animalTallies, initAnimalsState } from './animals.js';
 
@@ -40,7 +40,7 @@ export function createAnimalPool(W, seed, threads) {
   for (let k = 1; k <= threads; k++) {
     const q = new Float32Array(new SharedArrayBuffer(4 * (1 + QCAP * 6)));   // [0] count, then (kind, x, y, z, pen, -) per spawn
     queues.push(q);
-    const w = new Worker(new URL('./animalWorker.js', import.meta.url), { type: 'module' });
+    const w = new Worker(new URL('./animalWorker.js' + CAPS_QUERY, import.meta.url), { type: 'module' });
     w.onmessage = (ev) => { if (ev.data.t === 'ready' && ++readyN === threads) pool.ready = true; else if (ev.data.t === 'error') pool.error = ev.data.msg; };
     w.postMessage({ t: 'init', arrays, hash, ctrl, sc, tallies, queue: q, mask: masks[k], seed: (seed * 2654435761 + k * 40503) >>> 0 });
     pool.workers.push(w);

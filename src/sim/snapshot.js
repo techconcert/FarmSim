@@ -1,12 +1,15 @@
 // World snapshots for the simulation worker: every typed array the renderer, HUD or QA hooks read, packed into one
 // ArrayBuffer that is transferred (not copied) between the worker and the main thread, plus the plain scalar state.
 // No DOM, no WebGL; runs in a worker and under Node.
-import { MAX_ANIMALS, MAX_FARMERS } from '../config.js';
+import { MAX_ANIMALS, MAX_FARMERS, MAX_ITEMS, MAX_TASKS } from '../config.js';
 
-const SKIP = new Set(['hash', '_an', 'rand']);   // sim-private state the main thread never reads
+const SKIP = new Set(['hash', '_an', 'rand', '_freeItems', '_freeTasks']);   // sim-private state the main thread never reads
 
 // Layout of every typed array in W (top level and W.stats), in a fixed order. Animal and farmer arrays are copied only up to
-// the live count (scaled by their per-entity width, e.g. f_route has ROUTE_MAX * 2 floats per farmer).
+// the live count (scaled by their per-entity width, e.g. f_route has ROUTE_MAX * 2 floats per farmer), item and task arrays
+// up to their high-water mark.
+const CAP = { a_: MAX_ANIMALS, f_: MAX_FARMERS, i_: MAX_ITEMS, t_: MAX_TASKS };
+const live = (W, key) => (key.startsWith('a_') ? W.animalCount : key.startsWith('f_') ? W.farmerCount : key.startsWith('i_') ? W.itemHigh : W.taskHigh);
 export function snapshotLayout(W) {
   const entries = [];
   let off = 0;
@@ -14,7 +17,7 @@ export function snapshotLayout(W) {
     const v = obj[key];
     if (!ArrayBuffer.isView(v)) return;
     off = (off + 7) & ~7;
-    const per = key.startsWith('a_') ? v.length / MAX_ANIMALS : key.startsWith('f_') ? v.length / MAX_FARMERS : 0;
+    const cap = CAP[key.slice(0, 2)], per = cap ? v.length / cap : 0;
     entries.push({ path, key, ctor: v.constructor, length: v.length, offset: off, per });
     off += v.byteLength;
   };
@@ -27,7 +30,7 @@ export function snapshotLayout(W) {
 export function writeSnapshot(W, layout, buf) {
   for (const e of layout.entries) {
     const src = e.path ? W[e.path][e.key] : W[e.key];
-    const n = e.per ? Math.min(e.length, Math.ceil(e.per * (e.key.startsWith('a_') ? W.animalCount : W.farmerCount))) : e.length;
+    const n = e.per ? Math.min(e.length, Math.ceil(e.per * live(W, e.key))) : e.length;
     new e.ctor(buf, e.offset, n).set(n === e.length ? src : src.subarray(0, n));
   }
   const sc = {}, st = {};

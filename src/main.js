@@ -2,7 +2,7 @@
 import { createGL } from './render/gl.js';
 import { createWorld, setAnimalCount, setFarmerCount, initialSeed, snapshotPrev, advanceClock } from './ecs/world.js';
 import { buildHash } from './ecs/spatialHash.js';
-import { SIM_DT, MAX_STEPS_PER_FRAME, DEFAULT_ANIMALS, DEFAULT_FARMERS } from './config.js';
+import { SIM_DT, MAX_STEPS_PER_FRAME, DEFAULT_ANIMALS, DEFAULT_FARMERS, CAPS_QUERY } from './config.js';
 import { updateAnimals } from './sim/animals.js';
 import { updateTasks } from './sim/tasks.js';
 import { updateFarmers } from './sim/farmers.js';
@@ -69,7 +69,7 @@ ctx.orbit = orbit;
 const sim = USE_WORKER ? createSimClient() : null;
 function createSimClient() {
   const layout = snapshotLayout(W);
-  const worker = new Worker(new URL('./sim/worker.js', import.meta.url), { type: 'module' });
+  const worker = new Worker(new URL('./sim/worker.js' + CAPS_QUERY, import.meta.url), { type: 'module' });
   const c = { busy: true, spare: new ArrayBuffer(layout.bytes), back: new ArrayBuffer(layout.bytes), refresh: false, queue: [], cmds: new Map(), waiters: [], nextId: 1, onSnap: null };
   worker.onmessage = (ev) => {
     const m = ev.data;
@@ -141,6 +141,7 @@ const hud = createHud({
   onResetCamera: () => orbit.reset(),
 });
 farm = installQA(ctx);
+farm.units = units;   // stress harness: toggles adaptive LOD and reads the LOD distance
 for (const m of errors) { farm.error = m; farm.errors.push(m); }
 
 let last = performance.now(), fpsEma = 60, msEma = 16, frames = 0;
@@ -151,6 +152,8 @@ function frame(now) {
   if (raw > 0) { fpsEma += (Math.min(1 / raw, 240) - fpsEma) * 0.08; msEma += (raw * 1000 - msEma) * 0.08; }
   try {
     G.resize();
+    const t0 = performance.now();   // t0 / t1 / t2: sim and render CPU time per frame (read by the stress harness)
+    let simSteps = 0;
     if (sim) {
       // worker: request the due ticks as one batch whenever the worker is idle; the latest snapshot is drawn meanwhile
       if (!sim.pump()) {
@@ -160,7 +163,7 @@ function frame(now) {
           steps = Math.min(MAX_STEPS_PER_FRAME, Math.floor(ctx.acc / SIM_DT));
           if (ctx.acc > MAX_STEPS_PER_FRAME * SIM_DT) ctx.acc = MAX_STEPS_PER_FRAME * SIM_DT;   // worker behind: drop time like the inline cap
         }
-        if ((steps > 0 || sim.refresh) && sim.step(steps)) ctx.acc -= steps * SIM_DT;
+        if ((steps > 0 || sim.refresh) && sim.step(steps)) { ctx.acc -= steps * SIM_DT; simSteps = steps; }
       }
     } else if (!ctx.paused) {
       ctx.acc += dt * ctx.speed;
@@ -168,7 +171,9 @@ function frame(now) {
       const maxSteps = MAX_STEPS_PER_FRAME;
       while (ctx.acc >= SIM_DT && steps < maxSteps) { ctx.tick(); ctx.acc -= SIM_DT; steps++; }
       if (steps === maxSteps) ctx.acc = 0;
+      simSteps = steps;
     }
+    const t1 = performance.now();
     env.update(W, dt);
     units.update(W, Math.min(1, ctx.acc / SIM_DT));
     trucks.update(W, Math.min(1, ctx.acc / SIM_DT));
@@ -176,6 +181,8 @@ function frame(now) {
     G.render();
     frames++;
     const s = farm.stats;
+    // worker mode: sim time is the worker's measured cost of the ticks requested this frame (it runs in parallel with rendering)
+    const t2 = performance.now(); s.simMs = sim ? (W.simTickMs || 0) * simSteps : t1 - t0; s.renderMs = t2 - t1; s.simSteps = simSteps;
     s.fps = fpsEma; s.frameMs = msEma; s.frames = frames;
     farm.refresh(false);
     hud.update(s, now);
