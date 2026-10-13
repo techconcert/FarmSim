@@ -470,7 +470,7 @@ function startFlock(i) {
   else wanderTarget(i);
 }
 function spawnManure(p, x, z) {
-  if (_W.pen_manure[p] < MANURE_CAP) spawnItem(_W, ItemKind.MANURE, x, p === SP.GOAT ? terrainHeight(x, z) : 0, z, p);
+  if (_W.pen_manure[p] < MANURE_CAP) _spawn(_W, ItemKind.MANURE, x, p === SP.GOAT ? terrainHeight(x, z) : 0, z, p);
 }
 
 function enter(i, st) {
@@ -562,7 +562,7 @@ function startChoice(i, c) {
 
 function layEgg(i) {
   const s = a_species[i];
-  spawnItem(_W, ItemKind.EGG, a_px[i] + (_rand() - 0.5) * 0.4, 0.06, a_pz[i] + (_rand() - 0.5) * 0.4, s);
+  _spawn(_W, ItemKind.EGG, a_px[i] + (_rand() - 0.5) * 0.4, 0.06, a_pz[i] + (_rand() - 0.5) * 0.4, s);
   a_produce[i] = 0;
 }
 
@@ -791,10 +791,24 @@ function waterStep(i, s, px, pz, slow, dt) {
 }
 
 // ------------------------------------------------------------------ main update
+// One tick of every animal. The work is split so the per-animal loop can also run in parallel threads, each owning a set of
+// species (= pens; animals never leave their pen): animalsStep runs the loop for the species in `mask` (null = all) and
+// animalsEnd folds the per-species tallies into the pen aggregates (manure, sickness, food / water drain) on one thread.
 export function updateAnimals(W, dt) {
-  const n = W.animalCount;
   if (!W._an) initAn(W);
-  const an = W._an;
+  animalsStep(W, dt, null);
+  animalsEnd(W, dt);
+}
+
+// per-species tallies of the last animalsStep (parallel runs merge the other threads' species into these before animalsEnd)
+export const animalTallies = { tCnt, tReady, tSick, tEat, tDrink };
+// item spawns from the per-animal loop (eggs, manure) go through this; a parallel worker defers them to the coordinating thread
+let _spawn = spawnItem;
+export function setItemSpawner(fn) { _spawn = fn || spawnItem; }
+export function initAnimalsState(W) { if (!W._an) initAn(W); }
+
+export function animalsStep(W, dt, mask) {
+  const n = W.animalCount;
   _W = W; _rand = W.rand; _n = n; _tick = W.tick; _night = isNight(W);
   a_px = W.a_px; a_py = W.a_py; a_pz = W.a_pz; a_vx = W.a_vx; a_vz = W.a_vz; a_heading = W.a_heading; a_speed = W.a_speed;
   a_tx = W.a_tx; a_tz = W.a_tz; a_stateTime = W.a_stateTime; a_animT = W.a_animT; a_gait = W.a_gait; a_scale = W.a_scale;
@@ -813,7 +827,7 @@ export function updateAnimals(W, dt) {
     const fs = W.f_state[f];
     if (fs !== 1 && fs !== 5) continue;       // FState.MOVE / WANDER only
     const p = W.f_pen[f];
-    if (p < 0) continue;
+    if (p < 0 || (mask !== null && mask[p] === 0)) continue;
     const fx = f_px[f], fz = f_pz[f], r = SCARE_R[p], fr2 = FREEZE_R2[p];
     const c = queryHash(hash, a_px, a_pz, fx, fz, r, _big, 512);
     for (let k = 0; k < c; k++) {
@@ -831,6 +845,7 @@ export function updateAnimals(W, dt) {
   const hCS = hash.cellStart, hIt = hash.items, hDim = hash.dim, hLast = hDim - 1, hInv = 1 / hash.cell, hHalf = hash.half;
   for (let i = 0; i < n; i++) {
     const s = a_species[i];
+    if (mask !== null && mask[s] === 0) continue;   // another thread's species
     let fl = a_flags[i];
     tCnt[s]++;
     if (fl & AFlag.READY) tReady[s]++;
@@ -955,7 +970,11 @@ export function updateAnimals(W, dt) {
     if (py !== ty) a_py[i] = py + (ty - py) * Math.min(1, dt * 10);
     if (WON[s] === 1 && (slow || a_wy[i] !== 0 || a_wvy[i] !== 0)) waterStep(i, s, px, pz, slow, dt);
   }
+}
 
+export function animalsEnd(W, dt) {
+  const n = W.animalCount, an = W._an, rand = W.rand;
+  _W = W; _rand = rand;
   // ---- pen aggregates + resource drain + manure + sickness
   for (let p = 0; p < NS; p++) {
     const cnt = tCnt[p];

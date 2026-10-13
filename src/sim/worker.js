@@ -8,14 +8,17 @@ import { updateTasks } from './tasks.js';
 import { updateFarmers } from './farmers.js';
 import { updateTrucks, spawnTruck } from './trucks.js';
 import { snapshotLayout, writeSnapshot } from './snapshot.js';
+import { createAnimalPool } from './parallel.js';
 
-let W = null, layout = null, dt = 1 / 30, dayCycle = true;
+let W = null, layout = null, dt = 1 / 30, dayCycle = true, pool = null;
 function tick() {
   snapshotPrev(W);
   advanceClock(W, dt);
   if (!dayCycle) W.hour = 12;
   buildHash(W.hash, W.a_px, W.a_pz, W.animalCount);
-  updateAnimals(W, dt);
+  const t0 = performance.now();
+  if (pool && pool.ready) pool.updateAnimals(W, dt); else updateAnimals(W, dt);
+  const ms = performance.now() - t0; W.simAnimalsMs = W.simAnimalsMs ? W.simAnimalsMs + (ms - W.simAnimalsMs) * 0.05 : ms;
   updateTasks(W, dt);
   updateFarmers(W, dt);
   updateTrucks(W, dt);
@@ -33,12 +36,16 @@ onmessage = (ev) => {
         dt = m.dt;
         W = createWorld({ seed: m.seed });
         setAnimalCount(W, m.animals); setFarmerCount(W, m.farmers); initialSeed(W);
+        pool = createAnimalPool(W, m.seed, m.threads | 0);   // shares W's arrays first, so the layout below sees the final ones
         layout = snapshotLayout(W);
         postMessage({ t: 'ready' });
         break;
       case 'step': {   // run n ticks (n may be 0: just refresh the snapshot after a command)
         if (m.dayCycle !== undefined) dayCycle = m.dayCycle;
+        const t0 = performance.now();
         for (let i = 0; i < m.n; i++) tick();
+        if (m.n > 0) { const ms = (performance.now() - t0) / m.n; W.simTickMs = W.simTickMs ? W.simTickMs + (ms - W.simTickMs) * 0.1 : ms; }
+        W.simThreads = pool && pool.ready ? pool.threads + 1 : 1;
         reply(m.id, m.buf, m.n);
         break;
       }
