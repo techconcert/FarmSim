@@ -80,6 +80,7 @@ const hud = createHud({
   onResetCamera: () => orbit.reset(),
 });
 farm = installQA(ctx);
+farm.units = units;   // STRESS-HARNESS HOOK: lets stress.html toggle adaptive LOD and read LOD distance
 for (const m of errors) { farm.error = m; farm.errors.push(m); }
 
 let last = performance.now(), fpsEma = 60, msEma = 16, frames = 0;
@@ -90,13 +91,15 @@ function frame(now) {
   if (raw > 0) { fpsEma += (Math.min(1 / raw, 240) - fpsEma) * 0.08; msEma += (raw * 1000 - msEma) * 0.08; }
   try {
     G.resize();
+    const t0 = performance.now();   // STRESS-HARNESS HOOK: t0/t1/t2 split CPU time into sim and render (read by stress.html)
+    let steps = 0;
     if (!ctx.paused) {
       ctx.acc += dt * ctx.speed;
-      let steps = 0;
       const maxSteps = MAX_STEPS_PER_FRAME;
       while (ctx.acc >= SIM_DT && steps < maxSteps) { ctx.tick(); ctx.acc -= SIM_DT; steps++; }
       if (steps === maxSteps) ctx.acc = 0;
     }
+    const t1 = performance.now();
     env.update(W, dt);
     units.update(W, Math.min(1, ctx.acc / SIM_DT));
     trucks.update(W, Math.min(1, ctx.acc / SIM_DT));
@@ -104,6 +107,7 @@ function frame(now) {
     G.render();
     frames++;
     const s = farm.stats;
+    const t2 = performance.now(); s.simMs = t1 - t0; s.renderMs = t2 - t1; s.simSteps = steps;
     s.fps = fpsEma; s.frameMs = msEma; s.frames = frames;
     farm.refresh(false);
     hud.update(s, now);

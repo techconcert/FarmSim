@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FarmSim stress harness (temporary)</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  #stress{position:fixed;right:10px;top:10px;z-index:50;max-width:min(760px,96vw);max-height:92vh;overflow:auto;background:rgba(14,18,24,.88);color:#e8eef5;font:12px/1.35 Menlo,monospace;padding:10px 12px;border-radius:8px}
+  #stress table{border-collapse:collapse;margin-top:6px}
+  #stress td,#stress th{padding:1px 6px;text-align:right;border-bottom:1px solid #334}
+  #stress .fail{color:#ff8a80} #stress .pass{color:#9be59b}
+  #stress button{font:inherit;margin:4px 4px 0 0}
+</style>
+<script>
+// STRESS HARNESS (temporary; delete the stress/ folder and the STRESS-HARNESS HOOK lines once the limit is known).
+// Raise the entity caps before any app module is evaluated. URL: ?capA=300000&capF=60000
+(function () {
+  var q = new URLSearchParams(location.search);
+  var a = +q.get('capA') || 300000, f = +q.get('capF') || 60000;
+  window.__FARM_CAPS = { animals: a, farmers: f, items: Math.max(4096, Math.ceil(a * 0.5)), tasks: Math.max(512, f * 2) };
+})();
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="stress">stress harness loading…</div>
+<script type="module" src="../src/main.js"></script>
+<script type="module" src="harness.js"></script>
+</body>
+</html>
