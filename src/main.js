@@ -48,7 +48,11 @@ const G = createGL(canvas); G.resize();
 const SEED = 1337;
 // The simulation runs in a module worker (src/sim/worker.js) so frame time is max(sim, render) instead of their sum.
 // ?worker=0 runs it on the main thread as before (debugging, or browsers without module workers).
-const USE_WORKER = typeof Worker !== 'undefined' && new URLSearchParams(location.search).get('worker') !== '0';
+const QS = new URLSearchParams(location.search);
+const USE_WORKER = typeof Worker !== 'undefined' && QS.get('worker') !== '0';
+// Extra threads for the animal update inside the worker (src/sim/parallel.js; needs a cross-origin isolated page, see serve.py).
+// ?threads=N overrides, ?threads=0 keeps it single-threaded.
+const ANIMAL_THREADS = QS.has('threads') ? Math.max(0, QS.get('threads') | 0) : Math.max(0, Math.min(3, (navigator.hardwareConcurrency || 2) - 3));
 // W is the renderer's view of the world. In worker mode it starts as an identical local copy (same seed and set-up as the
 // worker) and its arrays are then re-pointed at each snapshot the worker sends back.
 const W = createWorld({ seed: SEED });
@@ -84,7 +88,7 @@ function createSimClient() {
     else if (m.t === 'error') reportError(m.msg);
   };
   worker.onerror = e => reportError(e.message || 'simulation worker failed');
-  worker.postMessage({ t: 'init', seed: SEED, animals: DEFAULT_ANIMALS, farmers: DEFAULT_FARMERS, dt: SIM_DT });
+  worker.postMessage({ t: 'init', seed: SEED, animals: DEFAULT_ANIMALS, farmers: DEFAULT_FARMERS, dt: SIM_DT, threads: ANIMAL_THREADS });
   c.cmd = (op, v) => new Promise(res => { const id = c.nextId++; c.cmds.set(id, res); worker.postMessage({ t: 'cmd', op, v, id }); });
   // ask for n ticks if the worker is idle; returns false while a previous request is still running
   c.step = (n) => {
