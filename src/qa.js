@@ -16,15 +16,20 @@ export function installQA(ctx) {
   const farm = {
     ready: false, error: null, errors: [], stats, W, G,
     getStats() { refresh(true); return JSON.parse(JSON.stringify(stats)); },
-    setAnimalCount(n) { ctx.setAnimalCount(n); refresh(true); },
-    setFarmerCount(n) { ctx.setFarmerCount(n); refresh(true); },
+    // in worker mode these return promises that settle once the worker has applied them (the change shows in W on the next snapshot)
+    setAnimalCount(n) { const r = ctx.setAnimalCount(n); refresh(true); return r; },
+    setFarmerCount(n) { const r = ctx.setFarmerCount(n); refresh(true); return r; },
     setSpeed(x) { ctx.setSpeed(x); },
     pause() { ctx.setPaused(true); },
     resume() { ctx.setPaused(false); },
     setCamera(yaw, pitch, dist, tx, tz) { ctx.orbit.set(yaw, pitch, dist, tx, tz); },
-    setHour(h) { W.time = (W.day * 24 + ((h - START_HOUR + 24) % 24)) * DAY_LENGTH_SEC / 24; W.hour = h; },
-    spawnTruck(type) { return spawnTruck(W, type | 0); },   // 0 pickup, 1 van, 2 milk tanker (debug: ignores stock / cooldown)
-    stepSim(seconds) { const n = Math.round(seconds / SIM_DT); for (let i = 0; i < n; i++) ctx.tick(); refresh(true); return n; },
+    setHour(h) { if (ctx.setHour) return ctx.setHour(h); W.time = (W.day * 24 + ((h - START_HOUR + 24) % 24)) * DAY_LENGTH_SEC / 24; W.hour = h; },
+    spawnTruck(type) { return ctx.spawnTruck ? ctx.spawnTruck(type | 0) : spawnTruck(W, type | 0); },   // 0 pickup, 1 van, 2 milk tanker (debug: ignores stock / cooldown)
+    stepSim(seconds) {
+      const n = Math.round(seconds / SIM_DT);
+      if (ctx.stepSim) return ctx.stepSim(n).then(() => { refresh(true); return n; });   // worker: resolves after the ticks ran
+      for (let i = 0; i < n; i++) ctx.tick(); refresh(true); return n;
+    },
   };
   let lastHeavy = 0;
   function heavy() {
